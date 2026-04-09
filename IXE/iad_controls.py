@@ -70,7 +70,7 @@ def import_ref_data(self):
                 'is_ref': True,
             }
             self.add_line_to_list(line_name, line_color)
-            self.ax_spectrum.legend(fontsize = 4)
+            self.ax_spectrum.legend(fontsize=10)
             self.fig_spectrum.tight_layout()
             self.canvas_spectrum.draw()
         except Exception as e:
@@ -93,7 +93,7 @@ def remove_selected_line(self):
                     self.ax_spectrum.plot(line_data['x_data'], line_data['y_data'], label=line_name, color=line_data['color'], linestyle='-', linewidth=0.5)
             self.ax_spectrum.set_yticks([])  # Removes y-axis ticks
             self.ax_spectrum.set_yticklabels([])  # Removes y-axis labels
-            self.ax_spectrum.legend(fontsize = 4)
+            self.ax_spectrum.legend(fontsize=10)
             self.fig_spectrum.tight_layout()
             self.canvas_spectrum.draw()
         else:
@@ -208,11 +208,11 @@ def toggle_line_visibility(self, line_name, checkbox_var):
             self.ax_spectrum.set_ylabel("Intensity")
             self.ax_spectrum.set_yticks([])  # Removes y-axis ticks
             self.ax_spectrum.set_yticklabels([])  # Removes y-axis labels
-            self.ax_spectrum.legend(fontsize=4)
+            self.ax_spectrum.legend(fontsize=10)
             self.fig_spectrum.tight_layout()
             self.canvas_spectrum.draw()
             return
-    self.ax_spectrum.legend(fontsize=4)
+    self.ax_spectrum.legend(fontsize=10)
     self.fig_spectrum.tight_layout()
     self.canvas_spectrum.draw()
 
@@ -241,8 +241,8 @@ def plot_integrated_diff(self):
     self.ax_spectrum.plot(ref_x, ref_y, color=ref_line['color'], linewidth=0.5, label="REF")
     self.ax_spectrum.plot(ref_x, roi_y, color=roi_color, linewidth=0.5, label="ROI")
     self.ax_spectrum.fill_between(ref_x, 0, roi_y - ref_y, color=ref_line['color'], alpha=0.3, label="Integrated Diff.")
-    self.ax_spectrum.legend(fontsize=4)
-    self.ax_spectrum.set_title("Integrated Difference (ROI - Reference)")
+    self.ax_spectrum.legend(fontsize=10)
+    self.ax_spectrum.set_title("")
     self.ax_spectrum.set_xlabel("Column Index")
     self.ax_spectrum.set_ylabel("Intensity")
     self.ax_spectrum.set_yticks([])  # Removes y-axis ticks
@@ -291,8 +291,8 @@ def calculate_and_display_satellite_peak_iad(self):
     self.ax_spectrum.plot(spec_r_align, color=ref_line['color'], linewidth=0.5, label="REF")
     self.ax_spectrum.plot(spec_align, color=roi_color, linewidth=0.5, label="ROI")
     self.ax_spectrum.fill_between(np.arange(len(spec_align))[:transition_point], 0, spec_align[:transition_point] -spec_r_align[:transition_point], color=ref_line['color'], alpha=0.3, label="Satellite Diff.")
-    self.ax_spectrum.legend(fontsize=4)
-    self.ax_spectrum.set_title("Integrated Difference (ROI - Reference)")
+    self.ax_spectrum.legend(fontsize=10)
+    self.ax_spectrum.set_title("")
     self.ax_spectrum.set_xlabel("Column Index")
     self.ax_spectrum.set_ylabel("Intensity")
     self.ax_spectrum.set_yticks([])  # Removes y-axis ticks

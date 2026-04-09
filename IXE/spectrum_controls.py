@@ -20,21 +20,26 @@ def plot_roi_spectrum(self, line_color=None, line_style=None, line_width=None):
         return
 
     try:
+        row_begin, row_end = self.get_roi_row_range()
+        column_begin, column_end = self.get_roi_col_range()
+
         # Clear previous spectrum plot
         self.ax_spectrum.clear()
 
         # Get spectrum data
         spectrum = self.spect_processor.get_spectrum(
-            int(self.row_begin.get()),
-            int(self.row_end.get()),
-            int(self.column_begin.get()),
-            int(self.column_end.get())
+            row_begin,
+            row_end + 1,
+            column_begin,
+            column_end + 1
         )
         # Normalize the spectrum before plotting
         norm_spectrum = self.spect_processor.get_norm_spectrum(spectrum)
 
         # Store the last displayed ROI spectrum (normalized, raw)
         self.last_spectrum_roi = norm_spectrum.copy()
+        self.current_spectrum_moving_avg = 0
+        self.current_spectrum_bg_removed = self.bg_subtraction_enabled
 
         # Get user-selected values for line color, style, and width
         line_color = line_color or self.line_color.get()
@@ -51,8 +56,7 @@ def plot_roi_spectrum(self, line_color=None, line_style=None, line_width=None):
         self.ax_spectrum.legend()
 
         # Update the title and labels
-        title = "ROI Spectrum" + (" (BG Subtracted)" if self.bg_subtraction_enabled else "")
-        self.ax_spectrum.set_title(title)
+        self.ax_spectrum.set_title("")
         self.ax_spectrum.set_xlabel("Column Index")
         self.ax_spectrum.set_ylabel("Intensity")
         self.ax_spectrum.tick_params(axis='both', which='major', width=0.5)
@@ -107,18 +111,29 @@ def apply_moving_average(self):
     try:
         # Get the spectrum data from the selected ROI
         n_moveavg = int(self.n_moveavg.get())  # Get the user-input value from the UI
+        row_begin, row_end = self.get_roi_row_range()
+        column_begin, column_end = self.get_roi_col_range()
+        
         # Update the n_moveavg in the self.parm dictionary
         self.parm['n_moveavg'] = n_moveavg
 
-        # Re-initialize the SpectrumProcessor with the updated n_moveavg value
-        self.spect_processor = self.spect_processor.__class__(self.immm, self.parm['n_moveavg'])
+        # --- FIX START ---
+        # OLD INCORRECT LINE: This wiped the background settings by making a new object
+        # self.spect_processor = self.spect_processor.__class__(self.immm, self.parm['n_moveavg'])
+        
+        # NEW CORRECT LINE: Update the existing processor's setting directly.
+        # This preserves the background spectrum and the 'bg_subtracted' toggle state.
+        self.spect_processor.n_moveavg = self.parm['n_moveavg']
+        # --- FIX END ---
 
         # Get the spectrum data from the selected ROI
+        # Because we kept the existing spect_processor, get_spectrum() now checks 
+        # the internal self.bg_subtracted flag and applies subtraction if it was enabled.
         spectrum = self.spect_processor.get_spectrum(
-            int(self.row_begin.get()),
-            int(self.row_end.get()),
-            int(self.column_begin.get()),
-            int(self.column_end.get())
+            row_begin,
+            row_end + 1,
+            column_begin,
+            column_end + 1
         )
 
         # Apply the moving average to the spectrum data
@@ -127,13 +142,18 @@ def apply_moving_average(self):
 
         # Store the last displayed ROI spectrum (normalized, smoothed)
         self.last_spectrum_roi = norm_smoothed_spectrum.copy()
+        self.current_spectrum_moving_avg = self.parm['n_moveavg']
+        self.current_spectrum_bg_removed = self.bg_subtraction_enabled
 
         # Plot the smoothed spectrum in the spectrum axes
         self.ax_spectrum.clear()  # Clear the previous plot
+        
+        # Update title to reflect if BG is removed
+        self.ax_spectrum.set_title("")
+        
         self.ax_spectrum.plot(norm_smoothed_spectrum, color=self.line_color.get(), linestyle=self.line_style.get(), linewidth=float(self.line_width.get()), 
                               label=f"Run {self.run_number_label.cget('text').split(': ')[1]}")
         self.ax_spectrum.legend()
-        self.ax_spectrum.set_title("Smoothed ROI Spectrum")
         self.ax_spectrum.set_xlabel("Column Index")
         self.ax_spectrum.set_ylabel("Intensity")
         self.ax_spectrum.tick_params(axis='both', which='major', width=0.5)
@@ -163,13 +183,11 @@ def toggle_background_removal(self):
         self.bg_toggle.config(style='TButton', text="BG Remove (OFF)")
         return
     try:
-        bg_row_start = int(self.bg_row_begin.get())
-        bg_row_end = int(self.bg_row_end.get())
-        bg_col_start = int(self.column_begin.get())
-        bg_col_end = int(self.column_end.get())
+        bg_row_start, bg_row_end = self.get_bg_row_range()
+        bg_col_start, bg_col_end = self.get_roi_col_range()
         if (bg_row_start >= bg_row_end or bg_col_start >= bg_col_end or bg_row_start < 0 or bg_col_start < 0):
             raise ValueError("Invalid background ROI coordinates")
-        self.spect_processor.set_background_roi(bg_row_start, bg_row_end, bg_col_start, bg_col_end)
+        self.spect_processor.set_background_roi(bg_row_start, bg_row_end + 1, bg_col_start, bg_col_end + 1)
         self.spect_processor.toggle_background_subtraction(self.bg_subtraction_enabled)
         if hasattr(self, 'last_spectrum_roi'):
             self.plot_roi_spectrum()
@@ -183,22 +201,19 @@ def toggle_background_removal(self):
         self.bg_toggle.config(style='TButton', text="BG Remove (OFF)")
 
 def save_spectrum_data(self):
-    """Save the displayed spectrum data (x, y) to a CSV file with customized name."""
-    if not hasattr(self, 'spect_processor'):
-        print("Error: Process the image first")
+    """Save the spectrum currently displayed in the GUI."""
+    if not hasattr(self, 'last_spectrum_roi'):
+        print("Error: Plot a spectrum first")
         return
     
     try:
-        # Get the spectrum data from the selected ROI
-        spectrum = self.spect_processor.get_spectrum(
-            int(self.row_begin.get()),
-            int(self.row_end.get()),
-            int(self.column_begin.get()),
-            int(self.column_end.get())
-        )
-        # Prepare the x (column indices) and y (spectrum intensities) data
-        x_data = np.arange(len(spectrum))  # Column indices (x axis)
-        y_data = spectrum  # Spectrum intensities (y axis)
+        y_data = self.last_spectrum_roi.copy()
+        x_data = np.arange(len(y_data))
+        moving_avg = getattr(self, 'current_spectrum_moving_avg', 0)
+        bg_removed = getattr(self, 'current_spectrum_bg_removed', self.bg_subtraction_enabled)
+        row_begin, row_end = self.get_roi_row_range()
+        column_begin, column_end = self.get_roi_col_range()
+        bg_row_begin, bg_row_end = self.get_bg_row_range()
         
         # Get the input filename and extract the run number
         filename = self.original_filepath.split("/")[-1]  # Extract filename from path
@@ -210,97 +225,72 @@ def save_spectrum_data(self):
             print("Error: Run number not found in filename.")
             return
 
-        # Start building the new filename for saving
-        save_filename = f"Run_{run_number}_spectrum"
-        
-        # Append 'rmbg' if background removal has been applied
-        if self.bg_subtraction_enabled:
-            save_filename += "_rmbg"
-        
-        # Append moving average information if applied
-        #if hasattr(self, 'spect_processor') and self.spect_processor.n_moveavg != 5:  # Check if n_moveavg is updated
-            #save_filename += f"_movavg_{self.spect_processor.n_moveavg}n"
-        
-        save_filename += ".txt"  # Add .txt or .chi extension
+        save_filename = f"Run_{run_number}_spectrum.txt"
 
         # Ask the user for a file path to save the data
         save_path = filedialog.asksaveasfilename(
-            initialfile=save_filename,  # Use the generated filename
+            initialfile=save_filename,
             defaultextension='.txt',
-            filetypes=[('Text files', '*.txt'), ('CHI files', '*.chi'), ('All files', '*.*')]
+            filetypes=[('Text files', '*.txt'), ('All files', '*.*')]
         )
         
         if not save_path:
             return  # User cancelled
 
-        # Save the data as a CSV file
         with open(save_path, mode='w', newline='') as file:
-            writer = csv.writer(file, delimiter='	')  # Tab-separated values
-            writer.writerow([f"Spectrum (Moving Avg: 0)"])
-            writer.writerow(['X', 'Y'])  # Write header for data columns
+            writer = csv.writer(file, delimiter='	')
+            writer.writerow([f"Spectrum (Moving Avg: {moving_avg})"])
+            writer.writerow([f"Background removed: {bg_removed}"])
+            writer.writerow([f"ROI Rows: {row_begin}-{row_end}"])
+            writer.writerow([f"ROI Columns: {column_begin}-{column_end}"])
+            writer.writerow([f"BG Rows: {bg_row_begin}-{bg_row_end}"])
+            writer.writerow(['X', 'Y'])
             for i in range(len(x_data)):
-                writer.writerow([x_data[i], y_data[i]])  # Write each (x, y) pair of the smoothed data
+                writer.writerow([x_data[i], y_data[i]])
                 
-            print(f"Data saved to {save_path}")
+            print(f"Spectrum saved to {save_path}")
         
     except Exception as e:
         print(f"Error saving spectrum data: {e}")
     
 def save_smoothed_spectrum_data(self):
-    """Save the smoothed spectrum data (x, y) to a .txt or .chi file."""
-    if not hasattr(self, 'spect_processor'):
-        print("Error: Process the image first")
-        return
-    
-    try:
-        # Get the smoothed spectrum data (after moving average is applied)
-        spectrum = self.spect_processor.get_spectrum(
-            int(self.row_begin.get()),
-            int(self.row_end.get()),
-            int(self.column_begin.get()),
-            int(self.column_end.get())
-        )
-        
-        # Apply moving average to the spectrum data
-        smoothed_spectrum = self.spect_processor.moving_average(spectrum)
-        
-        # Prepare the x (column indices) and y (smoothed spectrum intensities) data
-        x_data = np.arange(len(smoothed_spectrum))  # Column indices (x axis)
-        y_data = smoothed_spectrum  # Smoothed spectrum intensities (y axis)
+    """Backward-compatible alias for saving the displayed spectrum."""
+    return save_spectrum_data(self)
 
-        # Get the input filename and extract the run number
-        filename = self.original_filepath.split("/")[-1]  # Extract filename from path
-        run_number_match = re.search(r"Run_(\d+)", filename)  # Regex to find "Run_XXX"
-        
+def save_spectrum_image(self):
+    """Save the current spectrum plot as an image file."""
+    if not hasattr(self, 'last_spectrum_roi'):
+        print("Error: Plot a spectrum first")
+        return
+
+    try:
+        filename = self.original_filepath.split("/")[-1]
+        run_number_match = re.search(r"Run_(\d+)", filename)
+
         if run_number_match:
-            run_number = run_number_match.group(1)  # Extract the run number
+            run_number = run_number_match.group(1)
         else:
             print("Error: Run number not found in filename.")
             return
 
-        # Start building the new filename for saving
-        save_filename = f"Run_{run_number}_spectrum_movavg_{self.spect_processor.n_moveavg}n"
-        save_filename += ".txt"  # Add .txt or .chi extension
-
-        # Ask the user for a file path to save the data
+        save_filename = f"Run_{run_number}_spectrum.png"
         save_path = filedialog.asksaveasfilename(
-            initialfile=save_filename,  # Use the generated filename
-            defaultextension='.txt',
-            filetypes=[('Text files', '*.txt'), ('CHI files', '*.chi'), ('All files', '*.*')]
+            initialfile=save_filename,
+            defaultextension='.png',
+            filetypes=[
+                ('PNG files', '*.png'),
+                ('PDF files', '*.pdf'),
+                ('SVG files', '*.svg'),
+                ('JPEG files', '*.jpg;*.jpeg'),
+                ('All files', '*.*'),
+            ]
         )
-        
-        if not save_path:
-            return  # User cancelled
 
-        # Save the smoothed data (moving average applied) as a text file
-        with open(save_path, mode='w', newline='') as file:
-            writer = csv.writer(file, delimiter='	')  # Tab-separated values
-            writer.writerow([f"Smoothed Spectrum (Moving Avg: {self.spect_processor.n_moveavg})"])
-            writer.writerow(['X', 'Y'])  # Write header for data columns
-            for i in range(len(x_data)):
-                writer.writerow([x_data[i], y_data[i]])  # Write each (x, y) pair of the smoothed data
-                
-            print(f"Smoothed Data saved to {save_path}")
+        if not save_path:
+            return
+
+        self.fig_spectrum.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Spectrum image saved to {save_path}")
 
     except Exception as e:
-        print(f"Error saving smoothed spectrum data: {e}")
+        print(f"Error saving spectrum image: {e}")

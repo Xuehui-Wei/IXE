@@ -6,6 +6,7 @@ from tkinter import filedialog, messagebox
 from PIL import Image
 import scipy.ndimage
 import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
 #from IXE.remove_cross import delete_zero_rows_and_columns
 
 def load_tiff(self):
@@ -13,6 +14,19 @@ def load_tiff(self):
     filepath = filedialog.askopenfilename(filetypes=[("TIFF files", "*.tiff *.tif")])
     if filepath:
         self.original_filepath = filepath  # Store the file path
+        if hasattr(self, 'reset_spectrum_state'):
+            self.reset_spectrum_state()
+        if hasattr(self, 'immm'):
+            delattr(self, 'immm')
+        if hasattr(self, 'line_begin') and self.line_begin:
+            self.line_begin.remove()
+            self.line_begin = None
+        if hasattr(self, 'line_end') and self.line_end:
+            self.line_end.remove()
+            self.line_end = None
+        if hasattr(self, 'bg_rect') and self.bg_rect:
+            self.bg_rect.remove()
+            self.bg_rect = None
         #self.file_path_label.config(text=f"File Path: {filepath}")  # Update the label with the file path
         self.file_path_entry.delete(0, tk.END)  # Clear the current value
         self.file_path_entry.insert(0, filepath)
@@ -25,6 +39,12 @@ def load_tiff(self):
             print("Error: Run number not found in filename.")
         self.im = Image.open(filepath)
         self.imm = np.array(self.im, dtype=np.float32)
+        if hasattr(self, 'update_roi_row_slider_limits'):
+            self.update_roi_row_slider_limits(self.imm.shape[0])
+        if hasattr(self, 'update_bg_row_slider_limits'):
+            self.update_bg_row_slider_limits(self.imm.shape[0])
+        if hasattr(self, 'update_roi_col_slider_limits'):
+            self.update_roi_col_slider_limits(self.imm.shape[1])
         self.display_image(self.imm, self.ax_image, "Raw Image")
         self.canvas_image.draw()
 
@@ -45,7 +65,14 @@ def remove_cross_raw(self):
         return
     try:
         self.imm = delete_zero_rows_and_columns(self.imm)
-        self.spect_processor = None
+        if hasattr(self, 'reset_spectrum_state'):
+            self.reset_spectrum_state()
+        if hasattr(self, 'update_roi_row_slider_limits'):
+            self.update_roi_row_slider_limits(self.imm.shape[0])
+        if hasattr(self, 'update_bg_row_slider_limits'):
+            self.update_bg_row_slider_limits(self.imm.shape[0])
+        if hasattr(self, 'update_roi_col_slider_limits'):
+            self.update_roi_col_slider_limits(self.imm.shape[1])
         self.display_image(self.imm, self.ax_image, "Raw Image (Cross Removed)")#
         self.canvas_image.draw()
     except Exception as e:
@@ -62,6 +89,12 @@ def process_image(self):
         self.immm = scipy.ndimage.rotate(self.imm, angle=tilt)
         self.immm[self.immm < threshold] = 0
         self.spect_processor = SpectrumProcessor(self.immm, self.parm['n_moveavg'])
+        if hasattr(self, 'update_roi_row_slider_limits'):
+            self.update_roi_row_slider_limits(self.immm.shape[0])
+        if hasattr(self, 'update_bg_row_slider_limits'):
+            self.update_bg_row_slider_limits(self.immm.shape[0])
+        if hasattr(self, 'update_roi_col_slider_limits'):
+            self.update_roi_col_slider_limits(self.immm.shape[1])
         self.display_image(self.immm, self.ax_image, "Processed Image")
         self.canvas_image.draw()
     except Exception as e:
@@ -69,54 +102,110 @@ def process_image(self):
 
 def display_image(self, data, ax, title):
     """Display an image in the specified axes"""
-    import matplotlib as mpl
-    ax.clear()
-    img_aspect = data.shape[1] / data.shape[0]  # width / height aspect ratio
-    fig_width = 6  # you can define a static width or calculate based on your need
-    fig_height = fig_width / img_aspect  # height based on the aspect ratio
+    self.root.update_idletasks()
 
-    # Create the figure with dynamic size and dpi
-    self.fig_image = plt.Figure(figsize=(fig_width, fig_height), dpi=self.fig_dpi)
-    img = ax.imshow(data, interpolation='antialiased', vmin=float(self.vmin_entry.get()), vmax=float(self.vmax_entry.get()), cmap='viridis')
-    ax.set_title(title, fontsize=5)
-    ax.set_xlabel('Columns', fontsize=4)
-    ax.set_ylabel('Rows', fontsize=4)
-    ax.tick_params(axis='both', which='major', labelsize=4)
-    ax.tick_params(axis='both', which='major', width=0.5)
+    ax.clear()
+    self.current_display_data = data
+    self.line_begin = None
+    self.line_end = None
+    self.bg_rect = None
+
+    canvas_widget = self.canvas_image.get_tk_widget()
+    canvas_width = max(canvas_widget.winfo_width(), 420)
+    canvas_height = max(canvas_widget.winfo_height(), 320)
+    self.fig_image.set_size_inches(
+        canvas_width / self.base_display_dpi,
+        canvas_height / self.base_display_dpi,
+        forward=True,
+    )
+    self.fig_image.set_dpi(self.fig_dpi)
+    self.fig_image.subplots_adjust(left=0.14, bottom=0.14, right=0.88, top=0.95)
+
+    img = ax.imshow(
+        data,
+        interpolation='antialiased',
+        vmin=float(self.vmin_entry.get()),
+        vmax=float(self.vmax_entry.get()),
+        cmap='viridis',
+    )
+    if hasattr(self, 'image_title_label'):
+        self.image_title_label.config(text=title)
+    if hasattr(self, 'image_xlabel_label'):
+        self.image_xlabel_label.config(text='Columns')
+    if hasattr(self, 'update_image_ylabel'):
+        self.update_image_ylabel()
+
+    ax.set_title('')
+    ax.set_xlabel('')
+    ax.set_ylabel('')
+    ax.tick_params(axis='both', which='major', labelsize=14, width=0.9, pad=4)
     if not hasattr(self, 'cbar') or self.cbar is None:
-        self.cbar = self.fig_image.colorbar(img, ax=ax, fraction=0.03, pad=0.04)
-        self.cbar.ax.tick_params(labelsize=4)
-        self.cbar.ax.tick_params(width=0.5)
+        self.cbar = self.fig_image.colorbar(img, ax=ax, fraction=0.046, pad=0.04)
+        self.cbar.ax.tick_params(labelsize=13, width=0.9)
     else:
         self.cbar.update_normal(img)
+        self.cbar.ax.tick_params(labelsize=13, width=0.9)
     ax.set_aspect('auto', adjustable='box')
     ax.set_xlim(0, data.shape[1])
     ax.set_ylim(data.shape[0], 0)
     for spine in ax.spines.values():
-        spine.set_linewidth(0.5)
-    self.fig_image.tight_layout(pad=3.0, h_pad=0.5, w_pad=0.5)
-    self.canvas_image.draw()
+        spine.set_linewidth(0.8)
+    if hasattr(self, 'refresh_image_overlays'):
+        self.refresh_image_overlays()
+    else:
+        self.canvas_image.draw_idle()
 
 def draw_lines(self):
     """Draw lines at row_begin and row_end on the processed image."""
-    if not hasattr(self, 'immm'):
-        messagebox.showwarning("Reminder", "Error: No processed image to draw lines on.")
+    if not hasattr(self, 'current_display_data'):
         return
     try:
-        row_begin = int(self.row_begin.get())
-        row_end = int(self.row_end.get())
-        if row_begin < 0 or row_end < 0 or row_begin >= self.immm.shape[0] or row_end >= self.immm.shape[0]:
+        data = self.current_display_data
+        row_begin, row_end = self.get_roi_row_range()
+        col_begin, col_end = self.get_roi_col_range()
+        if row_begin < 0 or row_end < 0 or row_begin >= data.shape[0] or row_end >= data.shape[0]:
             print("Invalid row indices.")
+            return
+        if col_begin < 0 or col_end < 0 or col_begin >= data.shape[1] or col_end >= data.shape[1]:
+            print("Invalid column indices.")
             return
         if hasattr(self, 'line_begin') and self.line_begin:
             self.line_begin.remove()
         if hasattr(self, 'line_end') and self.line_end:
             self.line_end.remove()
-        self.line_begin = self.ax_image.plot([0, self.immm.shape[1]-1], [row_begin, row_begin], color='w', linestyle='--', linewidth=0.5)[0]
-        self.line_end = self.ax_image.plot([0, self.immm.shape[1]-1], [row_end, row_end], color='w', linestyle='--', linewidth=0.5)[0]
+        self.line_begin = self.ax_image.plot([col_begin, col_end], [row_begin, row_begin], color='w', linestyle='--', linewidth=0.5)[0]
+        self.line_end = self.ax_image.plot([col_begin, col_end], [row_end, row_end], color='w', linestyle='--', linewidth=0.5)[0]
         self.canvas_image.draw()
     except Exception as e:
         print(f"Error drawing lines: {e}")
+
+def draw_background_roi(self):
+    """Draw the translucent background ROI rectangle on the current image."""
+    if not hasattr(self, 'current_display_data'):
+        return
+    try:
+        data = self.current_display_data
+        bg_row_begin, bg_row_end = self.get_bg_row_range()
+        col_begin, col_end = self.get_roi_col_range()
+        if bg_row_begin < 0 or bg_row_end < 0 or bg_row_begin >= data.shape[0] or bg_row_end >= data.shape[0]:
+            return
+        if col_begin < 0 or col_end < 0 or col_begin >= data.shape[1] or col_end >= data.shape[1]:
+            return
+        if hasattr(self, 'bg_rect') and self.bg_rect:
+            self.bg_rect.remove()
+        self.bg_rect = Rectangle(
+            (col_begin, bg_row_begin),
+            max(col_end - col_begin + 1, 1),
+            max(bg_row_end - bg_row_begin + 1, 1),
+            linewidth=0.4,
+            edgecolor='white',
+            facecolor='white',
+            alpha=0.3,
+        )
+        self.ax_image.add_patch(self.bg_rect)
+        self.canvas_image.draw_idle()
+    except Exception as e:
+        print(f"Error drawing background ROI: {e}")
 
 def save_processed_image(self):
     """Save the processed image with high quality"""
