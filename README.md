@@ -25,17 +25,31 @@ IXE is a Python tool for image processing and spectrum analysis of X-ray emissio
   python --version
   ```
 - **Tkinter (for GUI)**
-  Usually included with Python. 
+  Usually included with Python.
 
-### 2. Install Dependencies
+### 2. Create Target Directory
+Create a folder at your desired installation location:
+  ```bash
+  mkdir -p /your/target/path/IXE
+  cd /your/target/path/IXE
+  ```
+For example:
+  ```bash
+  mkdir -p ~/Downloads/IXE
+  cd ~/Downloads/IXE
+  ```
+### 3. Install Dependencies
 
   ```bash
   pip install numpy scipy matplotlib Pillow scikit-image
   ```
-### 3. Install IXE Package
-
+### 4. Install IXE Package
   ```bash
-  pip install git+https://github.com/Xuehui-Wei/IXE.git
+  git clone https://github.com/Xuehui-Wei/IXE.git ~/your/target/path/IXE
+  ```
+For example:
+  ```bash
+  git clone https://github.com/Xuehui-Wei/IXE.git ~/Downloads/IXE
   ```
 
 ## How to Run?
