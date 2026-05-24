@@ -16,11 +16,14 @@ import re
 
 try:
     from .peak_fitting import PeakFitConfig, PeakFitError, fit_spectrum
+    from . import pyqtgraph_spectrum
 except ImportError:
     try:
         from peak_fitting import PeakFitConfig, PeakFitError, fit_spectrum
+        import pyqtgraph_spectrum
     except ImportError:
         from IXE.peak_fitting import PeakFitConfig, PeakFitError, fit_spectrum
+        from IXE import pyqtgraph_spectrum
 
 
 def _entry_text(entry_widget):
@@ -467,6 +470,63 @@ def _set_spectrum_container_labels(self, xlabel, ylabel):
         self.update_spectrum_ylabel()
 
 
+def _ensure_pyqtgraph_spectrum_viewer(self):
+    if not pyqtgraph_spectrum.pyqtgraph_available():
+        messagebox.showwarning(
+            "Sharp Spectrum",
+            "pyqtgraph with a Qt binding is required for the sharp spectrum viewer.",
+        )
+        return None
+    viewer = getattr(self, 'pyqtgraph_spectrum_viewer', None)
+    if viewer is None:
+        viewer = pyqtgraph_spectrum.PyQtGraphSpectrumViewer()
+        self.pyqtgraph_spectrum_viewer = viewer
+    return viewer
+
+
+def _schedule_pyqtgraph_event_pump(self):
+    if getattr(self, '_pyqtgraph_event_pump_active', False):
+        return
+    if not hasattr(self, 'root'):
+        return
+
+    self._pyqtgraph_event_pump_active = True
+
+    def _pump():
+        viewer = getattr(self, 'pyqtgraph_spectrum_viewer', None)
+        if viewer is not None and viewer.is_visible():
+            viewer.process_events()
+            self.root.after(33, _pump)
+            return
+        self._pyqtgraph_event_pump_active = False
+
+    self.root.after(33, _pump)
+
+
+def _sync_pyqtgraph_spectrum_view(self, xlabel="Column Index", ylabel="Normalized intensity", show_legend=True):
+    viewer = getattr(self, 'pyqtgraph_spectrum_viewer', None)
+    if viewer is None or not viewer.is_visible():
+        return
+    viewer.update_from_axes(self.ax_spectrum, xlabel=xlabel, ylabel=ylabel, show_legend=show_legend)
+    _schedule_pyqtgraph_event_pump(self)
+
+
+def open_pyqtgraph_spectrum_view(self):
+    """Open a pyqtgraph spectrum viewer synchronized from the current spectrum axes."""
+    viewer = _ensure_pyqtgraph_spectrum_viewer(self)
+    if viewer is None:
+        return
+    viewer.show()
+    _schedule_pyqtgraph_event_pump(self)
+    if hasattr(self, 'ax_spectrum') and pyqtgraph_spectrum.axes_have_visible_data(self.ax_spectrum):
+        xlabel = getattr(self, 'spectrum_xlabel_label', None)
+        ylabel = getattr(self, 'spectrum_ylabel_text', "Normalized intensity")
+        xlabel_text = xlabel.cget("text") if xlabel is not None else "Column Index"
+        viewer.update_from_axes(self.ax_spectrum, xlabel=xlabel_text, ylabel=ylabel, show_legend=True)
+    else:
+        messagebox.showinfo("Sharp Spectrum", "Plot a spectrum first, then this window will mirror it.")
+
+
 def _spectrum_canvas_size(self, event=None):
     fallback_width = int(getattr(self, 'spectrum_initial_width_px', 600))
     fallback_height = int(getattr(self, 'spectrum_initial_height_px', 400))
@@ -713,6 +773,7 @@ def _finish_spectrum_axes(self, xlabel="Column Index", ylabel="Normalized intens
                 frameon=False,
             )
     self.canvas_spectrum.draw()
+    _sync_pyqtgraph_spectrum_view(self, xlabel=xlabel, ylabel=ylabel, show_legend=show_legend)
 
 
 def plot_roi_spectrum(self, line_color=None, line_style=None, line_width=None):

@@ -1314,6 +1314,7 @@ class TIFFAnalyzer:
             ("corrected", "Gap C.", 6, self.show_gap_corrected_spectrum),
             ("fit", "Peak fit", 7, self.show_peak_fit_view),
             ("calibration", "Calibration", 9, self.show_calibrated_spectrum_view),
+            ("sharp", "Sharp", 6, self.open_pyqtgraph_spectrum_view),
         )
         for column, (mode, text, width, command) in enumerate(view_specs):
             button = ttk.Button(self.spectrum_view_bar, text=text, width=width, style="Compact.TButton", command=command)
@@ -1892,6 +1893,8 @@ class TIFFAnalyzer:
         return spectrum_controls.toggle_gap_correction(self)
     def toggle_trace_extraction(self):
         return spectrum_controls.toggle_trace_extraction(self)
+    def open_pyqtgraph_spectrum_view(self):
+        return spectrum_controls.open_pyqtgraph_spectrum_view(self)
     def on_spectrum_canvas_configure(self, event=None):
         return spectrum_controls.on_spectrum_canvas_configure(self, event)
     def open_color_picker(self):

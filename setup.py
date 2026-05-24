@@ -28,6 +28,8 @@ setup(
         "scipy>=1.0",
         "matplotlib>=3.0",
         "Pillow>=9.0",
+        "PyQt5>=5.15",
+        "pyqtgraph>=0.14",
         "scikit-image>=0.19",
     ],
 )
