@@ -1180,6 +1180,7 @@ class TIFFAnalyzer:
         self.spectrum_fig_dpi = 300
         self.spectrum_point_scale = self.spectrum_base_dpi / self.spectrum_fig_dpi
         self.spectrum_subplot_margins_px = {'left': 45, 'bottom': 24, 'right': 10, 'top': 10}
+        self.use_pyqtgraph_spectrum_as_primary = True
         
         # Single frame for images (raw or processed)
         self.image_frame = ttk.LabelFrame(
@@ -1294,8 +1295,20 @@ class TIFFAnalyzer:
 
         self.canvas_spectrum = FigureCanvasTkAgg(self.fig_spectrum, master=self.spectrum_plot_body)
         self.canvas_spectrum.get_tk_widget().configure(bg='white', highlightthickness=0, bd=0)
-        self.canvas_spectrum.get_tk_widget().grid(row=0, column=1, sticky="nsew")
         self.canvas_spectrum.get_tk_widget().bind("<Configure>", self.on_spectrum_canvas_configure, add="+")
+
+        self.spectrum_primary_message = tk.Label(
+            self.spectrum_plot_body,
+            text="Sharp spectrum display opens automatically after plotting.",
+            font=("Arial", 13),
+            bg='white',
+            fg='#595959',
+            anchor='center',
+        )
+        if self.use_pyqtgraph_spectrum_as_primary:
+            self.spectrum_primary_message.grid(row=0, column=1, sticky="nsew")
+        else:
+            self.canvas_spectrum.get_tk_widget().grid(row=0, column=1, sticky="nsew")
 
         self.spectrum_xlabel_label = tk.Label(
             self.spectrum_plot_body,
@@ -1314,7 +1327,6 @@ class TIFFAnalyzer:
             ("corrected", "Gap C.", 6, self.show_gap_corrected_spectrum),
             ("fit", "Peak fit", 7, self.show_peak_fit_view),
             ("calibration", "Calibration", 9, self.show_calibrated_spectrum_view),
-            ("sharp", "Sharp", 6, self.open_pyqtgraph_spectrum_view),
         )
         for column, (mode, text, width, command) in enumerate(view_specs):
             button = ttk.Button(self.spectrum_view_bar, text=text, width=width, style="Compact.TButton", command=command)
@@ -1327,6 +1339,8 @@ class TIFFAnalyzer:
         self.toolbar = NavigationToolbar2Tk(self.canvas_spectrum, self.spectrum_toolbar_frame, pack_toolbar=False)
         self.toolbar.update()
         self.toolbar.pack(fill=tk.X)
+        if self.use_pyqtgraph_spectrum_as_primary:
+            self.spectrum_toolbar_frame.grid_remove()
 
 
     def setup_fonts(self):

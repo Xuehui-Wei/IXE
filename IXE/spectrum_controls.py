@@ -484,6 +484,10 @@ def _ensure_pyqtgraph_spectrum_viewer(self):
     return viewer
 
 
+def _use_pyqtgraph_primary_spectrum(self):
+    return bool(getattr(self, 'use_pyqtgraph_spectrum_as_primary', False))
+
+
 def _schedule_pyqtgraph_event_pump(self):
     if getattr(self, '_pyqtgraph_event_pump_active', False):
         return
@@ -505,6 +509,12 @@ def _schedule_pyqtgraph_event_pump(self):
 
 def _sync_pyqtgraph_spectrum_view(self, xlabel="Column Index", ylabel="Normalized intensity", show_legend=True):
     viewer = getattr(self, 'pyqtgraph_spectrum_viewer', None)
+    if viewer is None and _use_pyqtgraph_primary_spectrum(self):
+        viewer = _ensure_pyqtgraph_spectrum_viewer(self)
+        if viewer is not None:
+            viewer.show()
+    elif viewer is not None and _use_pyqtgraph_primary_spectrum(self) and not viewer.is_visible():
+        viewer.show()
     if viewer is None or not viewer.is_visible():
         return
     viewer.update_from_axes(self.ax_spectrum, xlabel=xlabel, ylabel=ylabel, show_legend=show_legend)
