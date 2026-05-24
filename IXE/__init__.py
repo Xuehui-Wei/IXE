@@ -2,9 +2,12 @@
 # ============= 子模块导入 =============
 from IXE import image_processing
 from IXE import iad_controls
+from IXE import calibration_controls
 from IXE import spectrum_controls
+from IXE import project_io
 from IXE import remove_cross
 from IXE import spectrum_utils
+from IXE import peak_fitting
 
 # ============= 显式导出核心类 =============
 from IXE.spectrum_utils import SpectrumProcessor
@@ -18,8 +21,11 @@ __all__ = [
     'SpectrumProcessor',   # 光谱处理工具类
     'image_processing',    # 图像处理模块
     'iad_controls',        # IAD控制模块
+    'calibration_controls', # Energy calibration helpers
+    'peak_fitting',        # Peak fitting utilities
     'spectrum_controls',   # 光谱控制模块
+    'project_io',          # Project save/load helpers
     'remove_cross',        # 十字去除工具
-    'spectrum_utils'       # 光谱工具模块
+    'spectrum_utils',      # 光谱工具模块
     'delete_zero_rows_and_columns',  # 删除零行列的函数
 ]
