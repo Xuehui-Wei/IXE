@@ -150,6 +150,9 @@ def _build_manifest(self):
             "fractions": _json_safe(getattr(fit, "fractions", [])),
             "widths": _json_safe(getattr(fit, "widths", [])),
             "peak_shape": getattr(fit, "peak_shape", "pseudo_voigt"),
+            "physical_fit": bool(getattr(fit, "physical_fit", False)),
+            "tail_baseline_enabled": bool(getattr(fit, "tail_baseline_enabled", False)),
+            "tail_fraction": float(getattr(fit, "tail_fraction", 0.10)),
         }
 
     calibration_meta = {
@@ -168,6 +171,9 @@ def _build_manifest(self):
             "sigmas": _json_safe(getattr(fit, "sigmas", [])),
             "amplitudes": _json_safe(getattr(fit, "amplitudes", [])),
             "fractions": _json_safe(getattr(fit, "fractions", [])),
+            "physical_fit": bool(getattr(fit, "physical_fit", False)),
+            "tail_baseline_enabled": bool(getattr(fit, "tail_baseline_enabled", False)),
+            "tail_fraction": float(getattr(fit, "tail_fraction", 0.10)),
         }
 
     return {
@@ -227,6 +233,8 @@ def _write_project_arrays(self, h5_file):
         fit_group = h5_file.create_group("peak_fit")
         _write_array(fit_group, "x", fit.x)
         _write_array(fit_group, "raw_y", fit.raw_y)
+        _write_array(fit_group, "fit_y", getattr(fit, "fit_y", fit.raw_y))
+        _write_array(fit_group, "tail_baseline", getattr(fit, "tail_baseline", None))
         _write_array(fit_group, "best_fit", fit.best_fit)
         _write_array(fit_group, "normalized_fit", fit.normalized_fit)
         _write_array(fit_group, "baseline", fit.baseline)
@@ -248,6 +256,8 @@ def _write_project_arrays(self, h5_file):
             fit_group = cal_group.create_group("fit")
             _write_array(fit_group, "x", fit.x)
             _write_array(fit_group, "raw_y", fit.raw_y)
+            _write_array(fit_group, "fit_y", getattr(fit, "fit_y", fit.raw_y))
+            _write_array(fit_group, "tail_baseline", getattr(fit, "tail_baseline", None))
             _write_array(fit_group, "best_fit", fit.best_fit)
             _write_array(fit_group, "normalized_fit", fit.normalized_fit)
             _write_array(fit_group, "baseline", fit.baseline)
@@ -309,9 +319,13 @@ def _restore_peak_fit(h5_file, manifest):
     return PeakFitResult(
         x=_read_array(group, "x", np.array([], dtype=float)),
         raw_y=_read_array(group, "raw_y", np.array([], dtype=float)),
+        fit_y=_read_array(group, "fit_y", _read_array(group, "raw_y", np.array([], dtype=float))),
         best_fit=_read_array(group, "best_fit", np.array([], dtype=float)),
         normalized_fit=_read_array(group, "normalized_fit", np.array([], dtype=float)),
         baseline=_read_array(group, "baseline", np.array([], dtype=float)),
+        tail_baseline=_read_array(group, "tail_baseline", None),
+        tail_baseline_enabled=bool(peak_meta.get("tail_baseline_enabled", False)),
+        tail_fraction=float(peak_meta.get("tail_fraction", 0.10)),
         peak_curves=curves,
         centers=peak_meta.get("centers", []),
         sigmas=peak_meta.get("sigmas", []),
@@ -320,6 +334,7 @@ def _restore_peak_fit(h5_file, manifest):
         peak_labels=peak_meta.get("peak_labels", []),
         widths=peak_meta.get("widths", []),
         peak_shape=peak_meta.get("peak_shape", "pseudo_voigt"),
+        physical_fit=bool(peak_meta.get("physical_fit", False)),
     )
 
 
@@ -364,15 +379,20 @@ def _restore_calibration(self, h5_file, manifest):
         self.calibration_fit = PeakFitResult(
             x=_read_array(group, "x", np.array([], dtype=float)),
             raw_y=_read_array(group, "raw_y", np.array([], dtype=float)),
+            fit_y=_read_array(group, "fit_y", _read_array(group, "raw_y", np.array([], dtype=float))),
             best_fit=_read_array(group, "best_fit", np.array([], dtype=float)),
             normalized_fit=_read_array(group, "normalized_fit", np.array([], dtype=float)),
             baseline=_read_array(group, "baseline", np.array([], dtype=float)),
+            tail_baseline=_read_array(group, "tail_baseline", None),
+            tail_baseline_enabled=bool(fit_meta.get("tail_baseline_enabled", False)),
+            tail_fraction=float(fit_meta.get("tail_fraction", 0.10)),
             peak_curves=curves,
             centers=fit_meta.get("centers", []),
             sigmas=fit_meta.get("sigmas", []),
             amplitudes=fit_meta.get("amplitudes", []),
             fractions=fit_meta.get("fractions", []),
             peak_labels=fit_meta.get("peak_labels", []),
+            physical_fit=bool(fit_meta.get("physical_fit", False)),
         )
         centers = list(fit_meta.get("centers", []))
         if len(centers) >= 3:

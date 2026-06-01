@@ -3,7 +3,7 @@ cycler==0.12.1
 fonttools==4.59.0
 imageio==2.37.0
 importlib_resources==6.5.2
-# Editable install with no version control (IXE-package==0.1.0)
+# Editable install with no version control (IXE-package==2.0.0)
 ./
 kiwisolver==1.4.7
 lazy_loader==0.4

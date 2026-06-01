@@ -6,6 +6,14 @@ __pycache__/
 # Local macOS / launcher files
 .DS_Store
 /xes_analyzer.py
+/vibfit-main/
+
+# Local analysis examples, drafts, and generated spectrum outputs
+/example/
+/paper/
+/PEAK_FITTING_IAD_GUIDE.md
+/qt_spectrum_peak_params.txt
+/qt_spectrum_pkfit.txt
 
 # C extensions
 *.so

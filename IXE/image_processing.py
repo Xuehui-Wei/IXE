@@ -280,7 +280,70 @@ def _rolling_median(values, half_window):
         for index in range(values.size)
     ])
 
-def _detect_dark_gap_axis(profile, max_width=16, drop_fraction=0.55, center_window=0.35):
+def _centered_bounds(size, fraction, min_width=1):
+    size = int(size)
+    if size <= 0:
+        return 0, 0
+    try:
+        fraction = float(fraction)
+    except (TypeError, ValueError):
+        fraction = 1.0
+    if not np.isfinite(fraction) or fraction <= 0:
+        fraction = 1.0
+    fraction = min(fraction, 1.0)
+    width = int(round(size * fraction))
+    width = max(int(min_width), width, 1)
+    width = min(width, size)
+    center = (size - 1) / 2.0
+    start = int(round(center - (width - 1) / 2.0))
+    start = max(0, min(start, size - width))
+    return start, start + width
+
+def _central_axis_profile(work, axis, perpendicular_window=0.70):
+    """Median profile through the detector center, robust against edge artifacts."""
+    rows, cols = work.shape
+    if axis == 0:
+        start, end = _centered_bounds(cols, perpendicular_window, min_width=max(8, cols // 4))
+        return np.nanmedian(work[:, start:end], axis=1)
+    start, end = _centered_bounds(rows, perpendicular_window, min_width=max(8, rows // 4))
+    return np.nanmedian(work[start:end, :], axis=0)
+
+def _expand_gap_index(profile, index, baseline, max_width, span):
+    """Grow a single dark-axis index into a narrow seam run."""
+    profile = np.asarray(profile, dtype=float)
+    baseline = np.asarray(baseline, dtype=float)
+    size = profile.size
+    index = int(max(0, min(index, size - 1)))
+    center_depth = max(float(baseline[index] - profile[index]), 0.0)
+    threshold = profile[index] + max(center_depth * 0.45, float(span) * 0.01)
+
+    start = index
+    end = index + 1
+    while start > 0 and index - start < max_width and profile[start - 1] <= threshold:
+        start -= 1
+    while end < size and end - index <= max_width and profile[end] <= threshold:
+        end += 1
+
+    width = end - start
+    if width > max_width:
+        half = max_width // 2
+        start = max(0, index - half)
+        end = min(size, start + max_width)
+        start = max(0, end - max_width)
+
+    gap_axis = np.zeros(size, dtype=bool)
+    gap_axis[start:end] = True
+    return gap_axis
+
+def _detect_dark_gap_axis(
+    profile,
+    max_width=16,
+    drop_fraction=0.55,
+    center_window=0.35,
+    require_center=True,
+    center_power=4.0,
+    fallback_to_center=True,
+):
     profile = np.asarray(profile, dtype=float)
     if profile.size < 5 or not np.any(np.isfinite(profile)):
         return np.zeros(profile.size, dtype=bool)
@@ -296,46 +359,100 @@ def _detect_dark_gap_axis(profile, max_width=16, drop_fraction=0.55, center_wind
     half_window = max(max_width * 3, 5)
     baseline = _rolling_median(profile, half_window)
     depth = baseline - profile
+    relative_depth = depth / np.maximum(np.abs(baseline), np.finfo(float).eps)
+    finite_depth = depth[np.isfinite(depth)]
+    positive_depth = finite_depth[finite_depth > 0]
+    if positive_depth.size:
+        depth_floor = max(
+            span * 0.025,
+            float(np.nanpercentile(positive_depth, 70)) * 0.35,
+        )
+    else:
+        depth_floor = span * 0.025
+    # The physical CCD seam can be shallow in some images, so keep the hard
+    # drop test but add a gentler local-contrast test for weak dark seams.
+    relative_threshold = max(0.10, (1.0 - float(drop_fraction)) * 0.30)
     candidate = (
-        (profile < baseline * drop_fraction)
-        & (depth > span * 0.04)
+        (
+            (profile < baseline * drop_fraction)
+            | (relative_depth > relative_threshold)
+        )
+        & (depth > depth_floor)
         & (baseline > span * 0.02)
     )
     gap_axis = _short_runs(candidate, max_width)
 
     # Do not mark outer detector borders as CCD gaps.
     if np.any(gap_axis):
-        edge_margin = max(2, max_width)
+        edge_margin = max(2, max_width * 2)
         gap_axis[:edge_margin] = False
         gap_axis[-edge_margin:] = False
 
     runs = _true_runs(gap_axis)
-    if not runs:
-        return np.zeros(profile.size, dtype=bool)
-
     center = (profile.size - 1) / 2.0
     half_center_window = max(profile.size * float(center_window) / 2.0, max_width)
+    center_start, center_end = _centered_bounds(
+        profile.size,
+        center_window,
+        min_width=max(max_width * 2 + 1, 5),
+    )
     central_runs = [
         (start, end)
         for start, end in runs
         if abs(((start + end - 1) / 2.0) - center) <= half_center_window
     ]
-    if not central_runs:
+    candidate_runs = central_runs if central_runs else ([] if require_center else runs)
+
+    def score_run(run):
+        start, end = run
+        run_center = (start + end - 1) / 2.0
+        distance = abs(run_center - center)
+        run_depth = float(np.nanmean(np.clip(depth[start:end], 0.0, None)))
+        distance_norm = distance / max(half_center_window, 1.0)
+        return run_depth / (1.0 + 10.0 * (distance_norm ** float(center_power)))
+
+    if candidate_runs:
+        best_start, best_end = max(candidate_runs, key=score_run)
+        focused_gap_axis = np.zeros(profile.size, dtype=bool)
+        focused_gap_axis[best_start:best_end] = True
+        return focused_gap_axis
+
+    if not fallback_to_center:
         return np.zeros(profile.size, dtype=bool)
 
-    best_start, best_end = max(
-        central_runs,
-        key=lambda run: (
-            float(np.nansum(depth[run[0]:run[1]]))
-            / (abs(((run[0] + run[1] - 1) / 2.0) - center) + 1.0)
-        ),
+    # If thresholding misses the seam, pick the darkest center-weighted index.
+    # This follows the old cross-removal assumption that the seam intersection
+    # belongs near the detector center, but it keeps the image size dynamic.
+    local_indices = np.arange(center_start, center_end)
+    local_depth = np.clip(depth[center_start:center_end], 0.0, None)
+    robust_scale = max(
+        float(np.nanpercentile(np.abs(depth), 75)),
+        span * 0.02,
+        np.finfo(float).eps,
     )
-    focused_gap_axis = np.zeros(profile.size, dtype=bool)
-    focused_gap_axis[best_start:best_end] = True
-    return focused_gap_axis
+    distances = np.abs(local_indices - center)
+    distance_norm = distances / max(half_center_window, 1.0)
+    scores = (local_depth / robust_scale) - 2.5 * (distance_norm ** float(center_power))
+    best_local = int(local_indices[int(np.nanargmax(scores))])
+    if not np.isfinite(scores).any() or float(np.nanmax(scores)) < 0.15:
+        best_local = int(round(center))
+    return _expand_gap_index(profile, best_local, baseline, max_width, span)
 
-def detect_detector_gap_mask(image, max_width=16, drop_fraction=0.55, dilate=1, center_window=0.35):
-    """Detect fixed CCD seam/gap pixels in detector coordinates."""
+def detect_detector_gap_mask(
+    image,
+    max_width=16,
+    drop_fraction=0.55,
+    dilate=1,
+    center_window=0.22,
+    row_center_window=None,
+    col_center_window=None,
+):
+    """Detect fixed CCD seam/gap pixels in detector coordinates.
+
+    The seam is treated as the detector-centered cross.  Detection is allowed
+    to move with the current image shape, but it is strongly penalized if it
+    drifts away from the geometric center where CCD quadrants meet.
+    """
     data = np.asarray(image, dtype=np.float32)
     if data.ndim != 2 or data.size == 0:
         return np.zeros_like(data, dtype=bool)
@@ -343,19 +460,25 @@ def detect_detector_gap_mask(image, max_width=16, drop_fraction=0.55, dilate=1, 
     finite = np.isfinite(data)
     fill_value = float(np.nanmedian(data[finite])) if np.any(finite) else 0.0
     work = np.nan_to_num(data, nan=fill_value, posinf=fill_value, neginf=fill_value)
-    row_profile = np.nanmedian(work, axis=1)
-    col_profile = np.nanmedian(work, axis=0)
+    row_profile = _central_axis_profile(work, axis=0)
+    col_profile = _central_axis_profile(work, axis=1)
+    row_center_window = min(float(center_window if row_center_window is None else row_center_window), 0.24)
+    col_center_window = min(float(center_window if col_center_window is None else col_center_window), 0.20)
     gap_rows = _detect_dark_gap_axis(
         row_profile,
         max_width=max_width,
         drop_fraction=drop_fraction,
-        center_window=center_window,
+        center_window=row_center_window,
+        require_center=True,
+        center_power=4.0,
     )
     gap_cols = _detect_dark_gap_axis(
         col_profile,
         max_width=max_width,
         drop_fraction=drop_fraction,
-        center_window=center_window,
+        center_window=col_center_window,
+        require_center=True,
+        center_power=4.0,
     )
 
     mask = ~finite
@@ -507,7 +630,9 @@ def process_image(self):
             max_width=gap_defaults.get('mask_max_width', 16),
             drop_fraction=gap_defaults.get('mask_drop_fraction', 0.55),
             dilate=gap_defaults.get('mask_dilate', 1),
-            center_window=gap_defaults.get('mask_center_window', 0.35),
+            center_window=gap_defaults.get('mask_center_window', 0.22),
+            row_center_window=gap_defaults.get('mask_row_center_window', 0.22),
+            col_center_window=gap_defaults.get('mask_col_center_window', 0.20),
         )
         self.processed_gap_mask = rotate_detector_gap_mask(self.raw_gap_mask, tilt)
         self.processed_detector_background_mask = rotate_detector_background_mask(self.imm.shape, tilt)

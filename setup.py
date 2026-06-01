@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="IXE_package",  
-    version="0.1.0",    
+    version="2.0.0",
     author="Xuehui Wei",
     author_email="xwei47@asu.edu",
     description="This package provides tools for image processing and spectrum analysis of XES collected al LCLS.",

@@ -6,7 +6,7 @@ VibFit, adapted here for 1D IXE spectra without the VibFit Qt/Hyperspy stack.
 """
 
 import numpy as np
-from scipy.optimize import curve_fit
+from scipy.optimize import curve_fit, least_squares
 
 try:
     from scipy.signal import find_peaks
@@ -31,14 +31,29 @@ def _normalize_peak_shape(peak_shape):
 
 
 class PeakFitConfig:
-    def __init__(self, n_peaks=3, x_min=None, x_max=None, model="kbeta", peak_shape="pseudo_voigt"):
+    def __init__(
+        self,
+        n_peaks=3,
+        x_min=None,
+        x_max=None,
+        model="kbeta",
+        peak_shape="pseudo_voigt",
+        physical_fit=False,
+        tail_baseline=True,
+        tail_fraction=0.10,
+    ):
         self.n_peaks = int(n_peaks)
         self.x_min = x_min
         self.x_max = x_max
         self.model = model
         self.peak_shape = _normalize_peak_shape(peak_shape)
+        self.physical_fit = bool(physical_fit)
+        self.tail_baseline = bool(tail_baseline)
+        self.tail_fraction = _clamp(tail_fraction, 0.03, 0.30)
         if self.n_peaks <= 0:
             raise PeakFitError("Peak count must be a positive integer.")
+        if self.physical_fit and (str(self.model).lower() != "kbeta" or self.n_peaks != 3):
+            raise PeakFitError("Physical K-beta fit requires exactly 3 K-beta components.")
 
 
 class PeakFitResult:
@@ -57,12 +72,25 @@ class PeakFitResult:
         peak_labels=None,
         widths=None,
         peak_shape="pseudo_voigt",
+        physical_fit=False,
+        fit_y=None,
+        tail_baseline=None,
+        tail_baseline_enabled=False,
+        tail_fraction=0.10,
     ):
-        self.x = x
-        self.raw_y = raw_y
-        self.best_fit = best_fit
-        self.normalized_fit = normalized_fit
-        self.baseline = baseline
+        self.x = np.asarray(x, dtype=float)
+        self.raw_y = np.asarray(raw_y, dtype=float)
+        self.fit_y = np.asarray(fit_y if fit_y is not None else raw_y, dtype=float)
+        if self.fit_y.shape != self.raw_y.shape:
+            self.fit_y = self.raw_y.copy()
+        self.best_fit = np.asarray(best_fit, dtype=float)
+        self.normalized_fit = np.asarray(normalized_fit, dtype=float)
+        self.baseline = np.asarray(baseline, dtype=float)
+        if tail_baseline is None:
+            tail_baseline = np.zeros_like(self.raw_y, dtype=float)
+        self.tail_baseline = np.asarray(tail_baseline, dtype=float)
+        if self.tail_baseline.shape != self.raw_y.shape:
+            self.tail_baseline = np.zeros_like(self.raw_y, dtype=float)
         self.peak_curves = peak_curves
         self.centers = centers
         self.sigmas = sigmas
@@ -71,6 +99,9 @@ class PeakFitResult:
         self.peak_labels = peak_labels or [f"Peak {index + 1}" for index in range(len(centers))]
         self.widths = widths if widths is not None else [2.0 * float(value) for value in sigmas]
         self.peak_shape = _normalize_peak_shape(peak_shape)
+        self.physical_fit = bool(physical_fit)
+        self.tail_baseline_enabled = bool(tail_baseline_enabled)
+        self.tail_fraction = _clamp(tail_fraction, 0.03, 0.30)
 
 
 class FittedIADResult:
@@ -187,6 +218,44 @@ def _fit_mask(x, config):
     return mask
 
 
+def _tail_linear_baseline(x, y, fraction=0.10):
+    """Return a straight baseline through robust left/right tail levels."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    baseline = np.zeros_like(y, dtype=float)
+    if x.size < 6 or y.size != x.size:
+        return baseline
+
+    fraction = _clamp(fraction, 0.03, 0.30)
+    edge_count = int(round(x.size * fraction))
+    edge_count = max(3, min(edge_count, max(3, x.size // 3)))
+    if edge_count * 2 >= x.size:
+        edge_count = max(3, x.size // 4)
+    if edge_count < 3:
+        return baseline
+
+    left_x = x[:edge_count]
+    right_x = x[-edge_count:]
+    left_y = y[:edge_count]
+    right_y = y[-edge_count:]
+    left_finite = np.isfinite(left_x) & np.isfinite(left_y)
+    right_finite = np.isfinite(right_x) & np.isfinite(right_y)
+    if left_finite.sum() < 2 or right_finite.sum() < 2:
+        return baseline
+
+    x_left = float(np.nanmedian(left_x[left_finite]))
+    x_right = float(np.nanmedian(right_x[right_finite]))
+    y_left = float(np.nanmedian(left_y[left_finite]))
+    y_right = float(np.nanmedian(right_y[right_finite]))
+    if not all(np.isfinite(value) for value in (x_left, x_right, y_left, y_right)):
+        return baseline
+    if abs(x_right - x_left) <= _EPS:
+        baseline.fill(0.5 * (y_left + y_right))
+        return baseline
+    slope = (y_right - y_left) / (x_right - x_left)
+    return y_left + slope * (x - x_left)
+
+
 def _x_step(x):
     if x.size < 2:
         return 1.0
@@ -261,6 +330,31 @@ def _moving_average_for_initial(y):
     return np.convolve(y, kernel, mode="same")
 
 
+def _centered_moving_average(y, window):
+    y = np.asarray(y, dtype=float)
+    if y.size < 3:
+        return y.copy()
+    window = max(3, int(window))
+    if window % 2 == 0:
+        window += 1
+    window = min(window, y.size if y.size % 2 == 1 else y.size - 1)
+    if window < 3:
+        return y.copy()
+    half = window // 2
+    padded = np.pad(y, half, mode="edge")
+    kernel = np.ones(window, dtype=float) / float(window)
+    return np.convolve(padded, kernel, mode="valid")
+
+
+def _physical_fit_target(y):
+    y = np.asarray(y, dtype=float)
+    if y.size < 9:
+        return y.copy()
+    window = max(7, int(round(y.size * 0.045)))
+    first_pass = _centered_moving_average(y, window)
+    return 0.65 * first_pass + 0.35 * y
+
+
 def _right_half_width(x, y, peak_index):
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
@@ -319,7 +413,7 @@ def _append_peak_params(p0, lower, upper, amplitude, center, sigma, fraction, bo
     upper.extend([amp_upper, center_upper, sigma_upper, fraction_upper])
 
 
-def _build_kbeta_initial_params_and_bounds(x, y, peak_shape="pseudo_voigt"):
+def _build_kbeta_initial_params_and_bounds(x, y, peak_shape="pseudo_voigt", physical_fit=False):
     x_min = float(np.nanmin(x))
     x_max = float(np.nanmax(x))
     span = max(x_max - x_min, _x_step(x))
@@ -334,7 +428,7 @@ def _build_kbeta_initial_params_and_bounds(x, y, peak_shape="pseudo_voigt"):
     lower = [y_min - 5.0 * y_abs_scale, -10.0 * y_abs_scale]
     upper = [y_max + 5.0 * y_abs_scale, 10.0 * y_abs_scale]
 
-    y_smooth = _moving_average_for_initial(y)
+    y_smooth = _physical_fit_target(y) if physical_fit else _moving_average_for_initial(y)
     main_index = int(np.nanargmax(y_smooth))
     main_center = float(x[main_index])
     main_right_half_width = _right_half_width(x, y_smooth, main_index)
@@ -354,12 +448,20 @@ def _build_kbeta_initial_params_and_bounds(x, y, peak_shape="pseudo_voigt"):
     residual_center = satellite_center + 0.70 * sat_to_main
     residual_center = min(residual_center, main_center - 0.07 * span)
 
-    main_low = max(x_min, main_center - max(main_right_half_width * 1.2, 0.025 * span))
-    main_high = min(x_max, main_center + max(main_right_half_width * 0.8, 0.020 * span))
-    satellite_low = x_min
-    satellite_high = min(x_max, main_center - 0.14 * span)
-    residual_low = max(x_min, satellite_center + 0.15 * sat_to_main)
-    residual_high = min(x_max, main_center - 0.05 * span)
+    if physical_fit:
+        main_low = max(x_min, main_center - max(main_right_half_width * 1.0, 0.035 * span))
+        main_high = min(x_max, main_center + max(main_right_half_width * 1.4, 0.035 * span))
+        satellite_low = x_min
+        satellite_high = min(x_max, main_center - max(0.13 * span, step * 8.0))
+        residual_low = max(x_min, satellite_center + max(0.12 * sat_to_main, step * 5.0))
+        residual_high = min(x_max, main_center - max(0.045 * span, step * 5.0))
+    else:
+        main_low = max(x_min, main_center - max(main_right_half_width * 1.2, 0.025 * span))
+        main_high = min(x_max, main_center + max(main_right_half_width * 0.8, 0.020 * span))
+        satellite_low = x_min
+        satellite_high = min(x_max, main_center - 0.14 * span)
+        residual_low = max(x_min, satellite_center + 0.15 * sat_to_main)
+        residual_high = min(x_max, main_center - 0.05 * span)
     if satellite_low >= satellite_high or residual_low >= residual_high or main_low >= main_high:
         return _build_generic_initial_params_and_bounds(x, y, 3)
 
@@ -376,17 +478,17 @@ def _build_kbeta_initial_params_and_bounds(x, y, peak_shape="pseudo_voigt"):
         upper,
         amplitude=sat_height * max(0.16 * sat_to_main, step) * np.sqrt(2.0 * np.pi),
         center=satellite_center,
-        sigma=max(0.12 * sat_to_main, step * 3.0),
-        fraction=0.55,
+        sigma=max((0.11 if physical_fit else 0.12) * sat_to_main, step * 3.0),
+        fraction=0.35 if physical_fit else 0.55,
         bounds=(
             0.0,
             amp_upper,
             satellite_low,
             satellite_high,
-            max(step * 2.0, span * 0.025),
-            max(step * 3.0, span * 0.35),
+            max(step * 3.0, span * (0.035 if physical_fit else 0.025)),
+            max(step * 5.0, span * (0.12 if physical_fit else 0.35)),
             0.0,
-            1.0,
+            0.45 if physical_fit else 1.0,
         ),
         peak_shape=peak_shape,
     )
@@ -396,17 +498,17 @@ def _build_kbeta_initial_params_and_bounds(x, y, peak_shape="pseudo_voigt"):
         upper,
         amplitude=res_height * max(0.10 * sat_to_main, step) * np.sqrt(2.0 * np.pi),
         center=residual_center,
-        sigma=max(0.07 * sat_to_main, step * 2.0),
-        fraction=0.45,
+        sigma=max((0.08 if physical_fit else 0.07) * sat_to_main, step * 2.0),
+        fraction=0.25 if physical_fit else 0.45,
         bounds=(
             0.0,
             amp_upper,
             residual_low,
             residual_high,
-            max(step * 1.5, span * 0.018),
-            max(step * 2.5, span * 0.25),
+            max(step * 2.5, span * (0.035 if physical_fit else 0.018)),
+            max(step * 4.0, span * (0.10 if physical_fit else 0.25)),
             0.0,
-            1.0,
+            0.55 if physical_fit else 1.0,
         ),
         peak_shape=peak_shape,
     )
@@ -414,19 +516,19 @@ def _build_kbeta_initial_params_and_bounds(x, y, peak_shape="pseudo_voigt"):
         p0,
         lower,
         upper,
-        amplitude=main_height * max(main_right_half_width / 1.25, step) * np.sqrt(2.0 * np.pi),
+        amplitude=main_height * max(main_right_half_width / (1.00 if physical_fit else 1.25), step) * np.sqrt(2.0 * np.pi),
         center=main_center,
-        sigma=max(main_right_half_width / 1.3, step * 1.5),
-        fraction=0.35,
+        sigma=max(main_right_half_width / (1.05 if physical_fit else 1.3), step * 1.5),
+        fraction=0.20 if physical_fit else 0.35,
         bounds=(
             0.0,
             amp_upper,
             main_low,
             main_high,
-            max(step * 0.8, main_right_half_width * 0.45),
-            max(step * 1.2, main_right_half_width * 1.35),
+            max(step * 1.5, main_right_half_width * (0.65 if physical_fit else 0.45), span * (0.025 if physical_fit else 0.0)),
+            max(step * 3.0, main_right_half_width * (2.20 if physical_fit else 1.35), span * (0.060 if physical_fit else 0.0)),
             0.0,
-            0.85,
+            0.45 if physical_fit else 0.85,
         ),
         peak_shape=peak_shape,
     )
@@ -473,7 +575,7 @@ def _build_generic_initial_params_and_bounds(x, y, n_peaks, peak_shape="pseudo_v
 def _build_initial_params_and_bounds(x, y, config):
     n_peaks = int(config.n_peaks)
     if str(getattr(config, "model", "")).lower() == "kbeta" and n_peaks == 3:
-        return _build_kbeta_initial_params_and_bounds(x, y, config.peak_shape)
+        return _build_kbeta_initial_params_and_bounds(x, y, config.peak_shape, getattr(config, "physical_fit", False))
     return _build_generic_initial_params_and_bounds(x, y, n_peaks, config.peak_shape)
 
 
@@ -495,6 +597,50 @@ def _evaluate_model(x, params, n_peaks, x_mid, span, peak_shape="pseudo_voigt"):
         peak_curves.append(curve)
         y = y + curve
     return y, baseline, peak_curves
+
+
+def _extract_peak_params(params, n_peaks, peak_shape="pseudo_voigt"):
+    peak_shape = _normalize_peak_shape(peak_shape)
+    peaks = []
+    idx = 2
+    for _peak_index in range(n_peaks):
+        if peak_shape == "lorentzian":
+            peaks.append((float(params[idx]), float(params[idx + 1]), float(params[idx + 2]), 1.0))
+            idx += 3
+        else:
+            peaks.append((float(params[idx]), float(params[idx + 1]), float(params[idx + 2]), float(params[idx + 3])))
+            idx += 4
+    return peaks
+
+
+def _positive_violation(value):
+    return max(float(value), 0.0)
+
+
+def _physical_kbeta_penalties(params, x, x_mid, span, peak_shape, y_scale):
+    peaks = _extract_peak_params(params, 3, peak_shape)
+    sat_amp, sat_center, sat_sigma, _sat_fraction = peaks[0]
+    res_amp, res_center, res_sigma, _res_fraction = peaks[1]
+    main_amp, main_center, main_sigma, _main_fraction = peaks[2]
+    _model_y, _baseline, curves = _evaluate_model(x, params, 3, x_mid, span, peak_shape)
+    heights = [float(np.nanmax(curve)) if curve.size else 0.0 for curve in curves]
+    sat_height, res_height, main_height = heights
+    area_scale = max(y_scale * span, _EPS)
+    height_scale = max(y_scale, _EPS)
+    span_scale = max(span, _EPS)
+    penalties = [
+        18.0 * _positive_violation(sat_amp - 0.75 * main_amp) / area_scale,
+        32.0 * _positive_violation(res_amp - 0.32 * main_amp) / area_scale,
+        20.0 * _positive_violation((sat_amp + res_amp) - 0.78 * main_amp) / area_scale,
+        14.0 * _positive_violation(sat_height - 0.45 * main_height) / height_scale,
+        32.0 * _positive_violation(res_height - 0.32 * main_height) / height_scale,
+        10.0 * _positive_violation(res_sigma - 1.15 * main_sigma) / span_scale,
+        12.0 * _positive_violation(0.55 * main_sigma - res_sigma) / span_scale,
+        10.0 * _positive_violation(sat_sigma - 2.25 * main_sigma) / span_scale,
+        22.0 * _positive_violation(0.045 * span - (main_center - res_center)) / span_scale,
+        12.0 * _positive_violation(0.070 * span - (res_center - sat_center)) / span_scale,
+    ]
+    return np.asarray(penalties, dtype=float)
 
 
 def _curve_fwhm(x, y):
@@ -551,27 +697,63 @@ def fit_spectrum(x, y, config=None):
     x_fit = x[mask]
     y_fit = y[mask]
     n_peaks = int(config.n_peaks)
-    p0, lower, upper, x_mid, span, peak_labels = _build_initial_params_and_bounds(x_fit, y_fit, config)
+    tail_baseline_enabled = bool(getattr(config, "tail_baseline", False))
+    tail_fraction = float(getattr(config, "tail_fraction", 0.10))
+    tail_baseline = (
+        _tail_linear_baseline(x_fit, y_fit, tail_fraction)
+        if tail_baseline_enabled
+        else np.zeros_like(y_fit, dtype=float)
+    )
+    fit_y = y_fit - tail_baseline
+    p0, lower, upper, x_mid, span, peak_labels = _build_initial_params_and_bounds(x_fit, fit_y, config)
+    physical_fit = bool(
+        getattr(config, "physical_fit", False)
+        and str(getattr(config, "model", "")).lower() == "kbeta"
+        and n_peaks == 3
+    )
+    fit_target = _physical_fit_target(fit_y) if physical_fit else fit_y
 
     def model_func(x_values, *params):
         model_y, _baseline, _peaks = _evaluate_model(x_values, params, n_peaks, x_mid, span, config.peak_shape)
         return model_y
 
     try:
-        popt, _pcov = curve_fit(
-            model_func,
-            x_fit,
-            y_fit,
-            p0=p0,
-            bounds=(lower, upper),
-            sigma=_fit_sigma(y_fit),
-            maxfev=40000,
-        )
+        if physical_fit:
+            fit_sigma = _fit_sigma(fit_target)
+            y_scale = max(float(np.nanmax(fit_target) - np.nanmin(fit_target)), _EPS)
+
+            def residuals(params):
+                model_y, _baseline, _peaks = _evaluate_model(x_fit, params, n_peaks, x_mid, span, config.peak_shape)
+                data_residuals = (model_y - fit_target) / fit_sigma
+                penalties = _physical_kbeta_penalties(params, x_fit, x_mid, span, config.peak_shape, y_scale)
+                return np.concatenate([data_residuals, penalties])
+
+            result = least_squares(
+                residuals,
+                np.asarray(p0, dtype=float),
+                bounds=(np.asarray(lower, dtype=float), np.asarray(upper, dtype=float)),
+                loss="soft_l1",
+                f_scale=1.0,
+                max_nfev=40000,
+            )
+            if result.x.size != len(p0) or not np.all(np.isfinite(result.x)):
+                raise RuntimeError(result.message)
+            popt = result.x
+        else:
+            popt, _pcov = curve_fit(
+                model_func,
+                x_fit,
+                fit_target,
+                p0=p0,
+                bounds=(lower, upper),
+                sigma=_fit_sigma(fit_target),
+                maxfev=40000,
+            )
     except Exception as exc:
         raise PeakFitError("Peak fitting failed: {0}".format(exc))
 
     best_fit, baseline, peak_curves = _evaluate_model(x_fit, popt, n_peaks, x_mid, span, config.peak_shape)
-    normalized_fit = _match_data_scale(best_fit, y_fit)
+    normalized_fit = _match_data_scale(best_fit, fit_y)
     centers = []
     sigmas = []
     amplitudes = []
@@ -598,9 +780,13 @@ def fit_spectrum(x, y, config=None):
     return PeakFitResult(
         x=x_fit,
         raw_y=y_fit,
+        fit_y=fit_y,
         best_fit=best_fit,
         normalized_fit=normalized_fit,
         baseline=baseline,
+        tail_baseline=tail_baseline,
+        tail_baseline_enabled=tail_baseline_enabled,
+        tail_fraction=tail_fraction,
         peak_curves=peak_curves,
         centers=centers,
         sigmas=sigmas,
@@ -609,6 +795,7 @@ def fit_spectrum(x, y, config=None):
         peak_labels=peak_labels,
         widths=widths,
         peak_shape=config.peak_shape,
+        physical_fit=physical_fit,
     )
 
 
