@@ -286,14 +286,16 @@ def _write_project_arrays(self, h5_file):
 
 def save_project(self):
     """Save the whole IXE analysis session as one .ixeproj file."""
-    run_number = _current_run_number(self).replace(" ", "_").replace(":", "")
-    initialfile = f"Run_{run_number}.ixeproj" if run_number and run_number != "Not_Loaded" else "IXE_project.ixeproj"
-    save_path = filedialog.asksaveasfilename(
-        initialfile=initialfile,
-        defaultextension=".ixeproj",
-    )
+    save_path = getattr(self, "current_project_path", "")
     if not save_path:
-        return
+        run_number = _current_run_number(self).replace(" ", "_").replace(":", "")
+        initialfile = f"Run_{run_number}.ixeproj" if run_number and run_number != "Not_Loaded" else "IXE_project.ixeproj"
+        save_path = filedialog.asksaveasfilename(
+            initialfile=initialfile,
+            defaultextension=".ixeproj",
+        )
+        if not save_path:
+            return
     try:
         manifest = _build_manifest(self)
         with h5py.File(save_path, "w") as h5_file:
@@ -302,10 +304,11 @@ def save_project(self):
             h5_file.attrs["format"] = PROJECT_FORMAT
             h5_file.attrs["version"] = PROJECT_VERSION
             _write_project_arrays(self, h5_file)
+        self.current_project_path = save_path
         print(f"Project saved to {save_path}")
-        messagebox.showinfo("Save Project", f"Project saved:\n{save_path}")
+        messagebox.showinfo("Export Project", f"Project saved:\n{save_path}")
     except Exception as exc:
-        messagebox.showwarning("Save Project", str(exc))
+        messagebox.showwarning("Export Project", str(exc))
         print(f"Error saving project: {exc}")
 
 
@@ -664,14 +667,12 @@ def open_project(self):
 
             self.run_number_label.config(text=manifest.get("run_label", "Run: Not Loaded"))
             self.run_number_label_spectrum.config(text=manifest.get("run_label_spectrum", manifest.get("run_label", "Run: Not Loaded")))
-            self.bg_toggle.config(
-                text="BG Remove (ON)" if self.bg_subtraction_enabled else "BG Remove (OFF)",
-                style="Active.TButton" if self.bg_subtraction_enabled else "TButton",
-            )
-            self.gap_toggle.config(
-                text="Gap Mask (ON)" if self.gap_correction_enabled else "Gap Mask (OFF)",
-                style="Active.TButton" if self.gap_correction_enabled else "TButton",
-            )
+            if hasattr(self, "bg_subtraction_var"):
+                self.bg_subtraction_var.set(self.bg_subtraction_enabled)
+            if hasattr(self, "gap_correction_var"):
+                self.gap_correction_var.set(self.gap_correction_enabled)
+            self.bg_toggle.config(text="BG Remove", style="TButton")
+            self.gap_toggle.config(text="Gap Mask", style="TButton")
             if hasattr(self, "trace_toggle"):
                 self.trace_toggle.config(text="Trace ROI (ON)" if self.trace_extraction_enabled else "Trace ROI (OFF)")
 
@@ -700,6 +701,7 @@ def open_project(self):
                 title = "Stacked Raw Image"
             self.display_image(display_data, self.ax_image, title)
         _redraw_loaded_peak_fit(self)
+        self.current_project_path = project_path
         print(f"Project opened from {project_path}")
         messagebox.showinfo("Open Project", f"Project opened:\n{project_path}")
     except Exception as exc:

@@ -108,6 +108,96 @@ def _update_image_limits(self, image):
     if hasattr(self, 'update_roi_col_slider_limits'):
         self.update_roi_col_slider_limits(image.shape[1])
 
+def _set_default_image_ranges(self, image):
+    rows, cols = image.shape
+    max_row = max(rows - 1, 0)
+    max_col = max(cols - 1, 0)
+    center = rows // 2
+    roi_half = max(4, rows // 80)
+    row_begin = max(center - roi_half, 0)
+    row_end = min(center + roi_half, max_row)
+    bg_gap = max(10, rows // 40)
+    bg_height = max(roi_half * 2, 8)
+    bg_row_begin = min(center + bg_gap + bg_height, max_row)
+    bg_row_end = min(center + bg_gap + 2 * bg_height, max_row)
+    bg2_row_begin = max(center - bg_gap - 2 * bg_height, 0)
+    bg2_row_end = max(center - bg_gap - bg_height, 0)
+
+    for name, value in (
+        ('row_begin', row_begin),
+        ('row_end', row_end),
+        ('row2_begin', row_begin),
+        ('row2_end', row_end),
+        ('column_begin', 0),
+        ('column_end', max_col),
+        ('bg_row_begin', bg_row_begin),
+        ('bg_row_end', bg_row_end),
+        ('bg2_row_begin', bg2_row_begin),
+        ('bg2_row_end', bg2_row_end),
+    ):
+        var = getattr(self, name, None)
+        if var is not None:
+            var.set(int(value))
+        if hasattr(self, 'parm'):
+            self.parm[name] = int(value)
+
+    self.roi_second_enabled = False
+    if hasattr(self, 'parm'):
+        self.parm['roi_second_enabled'] = False
+    if hasattr(self, 'row_slider'):
+        self.row_slider.set_limits(0, max_row, row_begin, row_end, row_begin, row_end, invoke=False)
+    if hasattr(self, 'column_slider'):
+        self.column_slider.set_limits(0, max_col, 0, max_col, invoke=False)
+    if hasattr(self, 'bg_row_slider'):
+        self.bg_row_slider.set_limits(0, max_row, bg_row_begin, bg_row_end, bg2_row_begin, bg2_row_end, invoke=False)
+    if hasattr(self, '_sync_roi_row_buttons'):
+        self._sync_roi_row_buttons()
+    if hasattr(self, 'on_roi_rows_changed'):
+        self.on_roi_rows_changed(row_begin, row_end, row_begin, row_end, redraw=False)
+    if hasattr(self, 'on_roi_cols_changed'):
+        self.on_roi_cols_changed(0, max_col, redraw=False)
+    if hasattr(self, 'on_bg_rows_changed'):
+        self.on_bg_rows_changed(bg_row_begin, bg_row_end, bg2_row_begin, bg2_row_end, redraw=False)
+
+def _initialize_raw_spectrum_processor(self):
+    """Create a spectrum processor immediately after import, before tilt correction."""
+    from IXE.spectrum_utils import SpectrumProcessor
+    if not hasattr(self, 'imm'):
+        return
+    gap_defaults = self.parm.get('ccd_gap', {}) if hasattr(self, 'parm') else {}
+    self.parm['tilt_cor'] = 0.0
+    self.raw_gap_mask = detect_detector_gap_mask(
+        self.imm,
+        max_width=gap_defaults.get('mask_max_width', 16),
+        drop_fraction=gap_defaults.get('mask_drop_fraction', 0.55),
+        dilate=gap_defaults.get('mask_dilate', 1),
+        center_window=gap_defaults.get('mask_center_window', 0.22),
+        row_center_window=gap_defaults.get('mask_row_center_window', 0.22),
+        col_center_window=gap_defaults.get('mask_col_center_window', 0.20),
+    )
+    self.processed_gap_mask = rotate_detector_gap_mask(self.raw_gap_mask, 0.0)
+    self.processed_detector_background_mask = rotate_detector_background_mask(self.imm.shape, 0.0)
+    self.immm = self.imm
+    self.spect_processor = SpectrumProcessor(
+        self.immm,
+        self.parm['n_moveavg'],
+        invalid_pixel_mask=self.processed_gap_mask,
+        detector_background_mask=self.processed_detector_background_mask,
+        edge_valid_fraction_threshold=gap_defaults.get('edge_valid_fraction', 0.80),
+    )
+    if hasattr(self.spect_processor, 'toggle_gap_correction'):
+        self.spect_processor.toggle_gap_correction(getattr(self, 'gap_correction_enabled', gap_defaults.get('enabled', True)))
+        self.spect_processor.set_gap_correction_params(
+            max_width=gap_defaults.get('max_width', 8),
+            drop_fraction=gap_defaults.get('drop_fraction', 0.65),
+        )
+    if hasattr(self.spect_processor, 'toggle_trace_extraction'):
+        trace_defaults = self.parm.get('trace_extraction', {})
+        self.spect_processor.toggle_trace_extraction(getattr(self, 'trace_extraction_enabled', trace_defaults.get('enabled', False)))
+        self.spect_processor.set_trace_extraction_params(
+            search_margin=trace_defaults.get('search_margin', 60),
+        )
+
 def _set_entry_text(entry, text):
     if entry is None:
         return
@@ -174,10 +264,12 @@ def load_tiff(self):
         self.im = None
         self.imm = image
         _update_image_limits(self, self.imm)
+        _set_default_image_ranges(self, self.imm)
+        _initialize_raw_spectrum_processor(self)
         self.display_image(self.imm, self.ax_image, "Raw Image")
         self.canvas_image.draw()
     except Exception as e:
-        messagebox.showwarning("Import TIFF", str(e))
+        messagebox.showwarning("Import Image", str(e))
         print(f"Error loading TIFF: {e}")
 
 def load_tiff_stack(self):
@@ -204,12 +296,14 @@ def load_tiff_stack(self):
         self.imm = stacked_image
         _set_image_source_metadata(self, filepaths)
         _update_image_limits(self, self.imm)
+        _set_default_image_ranges(self, self.imm)
+        _initialize_raw_spectrum_processor(self)
         title = "Stacked Raw Image" if len(filepaths) > 1 else "Raw Image"
         self.display_image(self.imm, self.ax_image, title)
         self.canvas_image.draw()
         print(f"Loaded TIFF stack: {len(filepaths)} image(s), shape {self.imm.shape}")
     except Exception as e:
-        messagebox.showwarning("Import TIFF Stack", str(e))
+        messagebox.showwarning("Import Stack Image", str(e))
         print(f"Error loading TIFF stack: {e}")
 
 def auto_threshold(self):
@@ -951,7 +1045,7 @@ def save_processed_image(self):
             image.save(save_path)
         print(f"Image saved to {save_path}")
     except Exception as e:
-        messagebox.showwarning("Save Image", f"Could not save image:\n{e}")
+        messagebox.showwarning("Export Image", f"Could not save image:\n{e}")
         print(f"Error saving image: {e}")
 # image_processing.py
 # Image loading, cross removal, thresholding, and display functions for TIFFAnalyzer.

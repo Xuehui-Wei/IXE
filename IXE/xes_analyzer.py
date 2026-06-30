@@ -764,48 +764,20 @@ class TIFFAnalyzer:
         file_row = ttk.Frame(frame)
         file_row.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
         file_row.grid_columnconfigure(3, weight=1)
-        ttk.Button(file_row, text="Import TIFF", width=13, command=self.load_tiff).grid(row=0, column=0, padx=(0, 8), pady=3)
-        ttk.Button(file_row, text="Import TIFF Stack", width=17, command=self.load_tiff_stack).grid(row=0, column=1, padx=(0, 8), pady=3)
+        ttk.Button(file_row, text="Import Image", width=13, command=self.load_tiff).grid(row=0, column=0, padx=(0, 8), pady=3)
+        ttk.Button(file_row, text="Import Stack Image", width=17, command=self.load_tiff_stack).grid(row=0, column=1, padx=(0, 8), pady=3)
         ttk.Label(file_row, text="File Path:").grid(row=0, column=2, padx=(0, 6), pady=3, sticky="w")
         self.file_path_entry = ttk.Entry(frame, width=150, font=('Arial', 12))
         self.file_path_entry.insert(0, " ")  # Set the default placeholder tex
         self.file_path_entry.grid(in_=file_row, row=0, column=3, padx=(0, 0), pady=3, sticky="ew")
 
-        display_row = ttk.Frame(frame)
-        display_row.grid(row=1, column=0, columnspan=2, sticky="w", pady=2)
-        ttk.Label(display_row, text="vmin:").grid(row=0, column=0, padx=(0, 6), pady=4)
-        self.vmin_entry = ttk.Entry(frame, width=4, font=('Arial', 12))
-        self.vmin_entry.insert(0, str(self.parm['vmin']))
-        self.vmin_entry.grid(in_=display_row, row=0, column=1, padx=(0, 14), pady=4)
-        
-        ttk.Label(display_row, text="vmax:").grid(row=0, column=2, padx=(0, 6), pady=4)
-        self.vmax_entry = ttk.Entry(frame, width=4, font=('Arial', 12))
-        self.vmax_entry.insert(0, str(self.parm['vmax']))
-        self.vmax_entry.grid(in_=display_row, row=0, column=3, padx=(0, 14), pady=4)
-
-        ttk.Label(display_row, text="Cmap:").grid(row=0, column=4, padx=(0, 6), pady=4)
-        self.image_cmap = ttk.Combobox(
-            frame,
-            values=["viridis", "plasma", "inferno", "magma", "cividis", "gray", "Greys", "turbo"],
-            width=10,
-            state="readonly",
-        )
-        self.image_cmap.set(self.parm.get('cmap', 'viridis'))
-        self.image_cmap.grid(in_=display_row, row=0, column=5, padx=(0, 16), pady=4)
-        self.image_cmap.bind("<<ComboboxSelected>>", lambda event: self.update_image_cmap())
-
-        ttk.Label(display_row, text="Auto Tilt:").grid(row=0, column=6, padx=(0, 6), pady=4)
-        self.tilt_value = tk.StringVar(value=f"{self.parm['tilt_cor']:.2f}")
-        self.tilt_entry = ttk.Entry(frame, width=7, font=('Arial', 12), textvariable=self.tilt_value, state='readonly')
-        self.tilt_entry.grid(in_=display_row, row=0, column=7, padx=(0, 0), pady=4)
-        
         button_row = ttk.Frame(frame)
-        button_row.grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        button_row.grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
         self.process_button = RoundedButton(
             button_row,
-            text="Process>",
+            text="Tilt Correction",
             command=self.process_image,
-            width=104,
+            width=132,
             height=28,
             radius=13,
             border_width=1,
@@ -817,9 +789,12 @@ class TIFFAnalyzer:
         )
         self.process_button.grid(row=0, column=0, padx=(0, 8), pady=3)
         ttk.Button(button_row, text="Gap Mask", width=10, command=self.show_gap_mask).grid(row=0, column=1, padx=(0, 8), pady=3)
-        ttk.Button(button_row, text="Save Image", width=11, command=self.save_processed_image).grid(row=0, column=2, padx=(0, 8), pady=3)
-        ttk.Button(button_row, text="Open Project", width=13, command=self.open_project).grid(row=0, column=3, padx=(0, 8), pady=3)
-        ttk.Button(button_row, text="Save Project", width=13, command=self.save_project).grid(row=0, column=4, padx=(0, 0), pady=3)
+
+        project_row = ttk.Frame(frame)
+        project_row.grid(row=2, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        ttk.Button(project_row, text="Open Project", width=13, command=self.open_project).grid(row=0, column=0, padx=(0, 8), pady=3)
+        ttk.Button(project_row, text="Export Project", width=13, command=self.save_project).grid(row=0, column=1, padx=(0, 8), pady=3)
+        ttk.Button(project_row, text="Export Image", width=13, command=self.save_processed_image).grid(row=0, column=2, padx=(0, 0), pady=3)
 
     def setup_spectrum_controls(self):
         """Spectrum analysis controls"""
@@ -831,13 +806,13 @@ class TIFFAnalyzer:
         self.spectrum_control_notebook.grid(row=0, column=0, sticky="ew", padx=0, pady=0)
 
         plotting_panel = ttk.Frame(self.spectrum_control_notebook, padding=(8, 6))
-        self.spectrum_control_notebook.add(plotting_panel, text="Plotting")
+        self.spectrum_control_notebook.add(plotting_panel, text="Spectrum Plotting")
         plotting_panel.grid_columnconfigure(0, weight=0)
         plotting_panel.grid_columnconfigure(1, weight=1)
         plotting_panel.grid_columnconfigure(2, weight=0)
 
         fitting_panel = ttk.Frame(self.spectrum_control_notebook, padding=(8, 6))
-        self.spectrum_control_notebook.add(fitting_panel, text="Fitting")
+        self.spectrum_control_notebook.add(fitting_panel, text="Peak Fitting")
         fitting_panel.grid_columnconfigure(0, weight=1)
 
         label_grid = {'padx': (0, 6), 'pady': 1, 'sticky': 'e'}
@@ -877,9 +852,9 @@ class TIFFAnalyzer:
         )
         self.roi_button_frame = ttk.Frame(plotting_panel)
         self.roi_button_frame.grid(row=0, column=2, **action_grid)
-        self.roi_add_button = ttk.Button(self.roi_button_frame, text="+", width=2, command=self.add_roi_row_range)
+        self.roi_add_button = ttk.Button(self.roi_button_frame, text="Add a row", width=10, command=self.add_roi_row_range)
         self.roi_add_button.grid(row=0, column=0, padx=(0, 2), pady=0)
-        self.roi_remove_button = ttk.Button(self.roi_button_frame, text="-", width=2, command=self.remove_roi_row_range)
+        self.roi_remove_button = ttk.Button(self.roi_button_frame, text="Subtract a row", width=14, command=self.remove_roi_row_range)
         self.roi_remove_button.grid(row=0, column=1, padx=(0, 4), pady=0)
 
         ttk.Label(plotting_panel, text="ROI Columns:", width=12, anchor="e").grid(row=1, column=0, **label_grid)
@@ -907,9 +882,21 @@ class TIFFAnalyzer:
         self.plot_button.grid(row=0, column=2, padx=(4, 0), pady=0, sticky="w")
         self._sync_roi_row_buttons()
 
-        self.gap_toggle = ttk.Button(plotting_panel, text="Gap Mask (ON)", command=self.toggle_gap_correction)
-        self.gap_toggle.grid(row=1, column=2, **action_grid)
-        self.gap_toggle.config(style='Active.TButton' if self.gap_correction_enabled else 'TButton')
+        self.gap_action_frame = ttk.Frame(plotting_panel)
+        self.gap_action_frame.grid(row=1, column=2, **action_grid)
+        self.gap_correction_var = tk.BooleanVar(value=self.gap_correction_enabled)
+        self.gap_checkbox = ttk.Checkbutton(
+            self.gap_action_frame,
+            variable=self.gap_correction_var,
+            command=self.toggle_gap_correction,
+        )
+        self.gap_checkbox.grid(row=0, column=0, padx=(0, 2), pady=0, sticky="w")
+        self.gap_toggle = ttk.Button(
+            self.gap_action_frame,
+            text="Gap Mask",
+            command=lambda: (self.gap_correction_var.set(not self.gap_correction_var.get()), self.toggle_gap_correction()),
+        )
+        self.gap_toggle.grid(row=0, column=1, padx=0, pady=0, sticky="w")
         
         ttk.Label(plotting_panel, text="BG Rows:", width=12, anchor="e").grid(row=2, column=0, **label_grid)
         self.bg_row_begin = tk.IntVar(value=self.parm['bg_row_begin'])
@@ -946,36 +933,44 @@ class TIFFAnalyzer:
         self.bg_button_frame.grid(row=2, column=2, **action_grid)
         self.auto_bg_button = ttk.Button(self.bg_button_frame, text="Auto BG", command=self.auto_select_background_rows)
         self.auto_bg_button.grid(row=0, column=0, padx=(0, 4), pady=0, sticky="w")
+        self.bg_subtraction_var = tk.BooleanVar(value=self.bg_subtraction_enabled)
+        self.bg_checkbox = ttk.Checkbutton(
+            self.bg_button_frame,
+            variable=self.bg_subtraction_var,
+            command=self.toggle_background_removal,
+        )
+        self.bg_checkbox.grid(row=0, column=1, padx=(0, 2), pady=0, sticky="w")
         self.bg_toggle = ttk.Button(self.bg_button_frame, text="BG Remove", command=self.toggle_background_removal)
-        self.bg_toggle.grid(row=0, column=1, padx=0, pady=0, sticky="w")
+        self.bg_toggle.config(
+            command=lambda: (self.bg_subtraction_var.set(not self.bg_subtraction_var.get()), self.toggle_background_removal())
+        )
+        self.bg_toggle.grid(row=0, column=2, padx=0, pady=0, sticky="w")
         self.line_color = tk.StringVar(value="black")
 
         self.line_controls_row = ttk.Frame(plotting_panel)
         self.line_controls_row.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(0, 0))
-        for column in range(7):
-            self.line_controls_row.grid_columnconfigure(column, weight=1)
-
-        ttk.Button(self.line_controls_row, text="Pick Color", command=self.open_color_picker).grid(row=0, column=0, padx=6, pady=2)
-        ttk.Label(self.line_controls_row, text="Line Style:").grid(row=0, column=1, padx=6, pady=2, sticky="e")
+        ttk.Label(self.line_controls_row, text="Line Properties").grid(row=0, column=0, padx=(6, 10), pady=2, sticky="w")
+        ttk.Button(self.line_controls_row, text="Pick color", command=self.open_color_picker).grid(row=0, column=1, padx=6, pady=2)
+        ttk.Label(self.line_controls_row, text="Line Style:").grid(row=0, column=2, padx=6, pady=2, sticky="e")
         self.line_style = ttk.Combobox(self.line_controls_row, values=["-", "--", "-.", ":"], width=4)
         self.line_style.set("-")  # Default line style
-        self.line_style.grid(row=0, column=2, padx=6, pady=2, sticky="w")
+        self.line_style.grid(row=0, column=3, padx=6, pady=2, sticky="w")
         self.line_style.bind("<<ComboboxSelected>>", lambda event: self.update_plot())
-        ttk.Label(self.line_controls_row, text="Line Width:").grid(row=0, column=3, padx=6, pady=2, sticky="e")
+        ttk.Label(self.line_controls_row, text="Line Width:").grid(row=0, column=4, padx=6, pady=2, sticky="e")
         self.line_width = ttk.Entry(self.line_controls_row, width=5)
         self.line_width.insert(0, "0.5")  # Default line width
-        self.line_width.grid(row=0, column=4, padx=6, pady=2, sticky="w")
+        self.line_width.grid(row=0, column=5, padx=6, pady=2, sticky="w")
         self.line_width.bind("<KeyRelease>", lambda event: self.update_plot())
-        ttk.Button(self.line_controls_row, text="Save Spectrum", command=self.save_spectrum_data).grid(row=0, column=5, padx=6, pady=2)
-        ttk.Button(self.line_controls_row, text="Save Image", command=self.save_spectrum_image).grid(row=0, column=6, padx=6, pady=2)
+        ttk.Separator(self.line_controls_row, orient=tk.VERTICAL).grid(row=0, column=6, sticky="ns", padx=(10, 8), pady=2)
+        ttk.Button(self.line_controls_row, text="Export Spectrum", command=self.save_spectrum_data).grid(row=0, column=7, padx=6, pady=2)
 
         peak_defaults = self.parm.get('peak_fit', {})
         self.peak_fit_model_var = tk.StringVar(value=peak_defaults.get('peak_shape', 'pseudo_voigt'))
         self.fitting_controls_row = ttk.Frame(fitting_panel)
         self.fitting_controls_row.grid(row=0, column=0, sticky="ew", pady=(0, 2))
-        for column in range(10):
+        for column in range(18):
             self.fitting_controls_row.grid_columnconfigure(column, weight=0)
-        self.fitting_controls_row.grid_columnconfigure(9, weight=1)
+        self.fitting_controls_row.grid_columnconfigure(17, weight=1)
 
         ttk.Label(self.fitting_controls_row, text="Fit Model:").grid(row=0, column=0, padx=6, pady=2, sticky="e")
         ttk.Radiobutton(
@@ -1009,18 +1004,33 @@ class TIFFAnalyzer:
             self.peak_fit_end.insert(0, str(peak_defaults.get('x_max')))
         self.peak_fit_end.grid(row=0, column=8, padx=(2, 6), pady=2, sticky="w")
 
-        self.fitting_actions_row = ttk.Frame(fitting_panel)
-        self.fitting_actions_row.grid(row=1, column=0, sticky="w", pady=(0, 2))
-        ttk.Button(self.fitting_actions_row, text="Peak Fit", command=self.show_peak_fit_profile).grid(row=0, column=0, padx=6, pady=2)
-        ttk.Button(self.fitting_actions_row, text="Save pkfit", command=self.save_peak_fit_data).grid(row=0, column=1, padx=6, pady=2)
+        self.fitting_actions_row = self.fitting_controls_row
+        ttk.Separator(self.fitting_actions_row, orient=tk.VERTICAL).grid(row=0, column=9, sticky="ns", padx=(8, 8), pady=2)
         ttk.Button(
             self.fitting_actions_row,
-            text="Save Params",
+            text="Peak Fit",
+            style='Active.TButton',
+            command=self.show_peak_fit_profile,
+        ).grid(row=0, column=10, padx=6, pady=2)
+        ttk.Separator(self.fitting_actions_row, orient=tk.VERTICAL).grid(row=0, column=11, sticky="ns", padx=(8, 8), pady=2)
+        ttk.Label(self.fitting_actions_row, text="Fit Error:").grid(row=0, column=12, padx=(0, 4), pady=2, sticky="e")
+        self.peak_fit_error_var = tk.StringVar(value="")
+        ttk.Entry(
+            self.fitting_actions_row,
+            width=10,
+            textvariable=self.peak_fit_error_var,
+            state="readonly",
+        ).grid(row=0, column=13, padx=(0, 6), pady=2, sticky="w")
+        ttk.Separator(self.fitting_actions_row, orient=tk.VERTICAL).grid(row=0, column=14, sticky="ns", padx=(8, 8), pady=2)
+        ttk.Button(self.fitting_actions_row, text="Export PKfit", command=self.save_peak_fit_data).grid(row=0, column=15, padx=6, pady=2)
+        ttk.Button(
+            self.fitting_actions_row,
+            text="Export Params",
             command=self.save_peak_fit_parameters,
-        ).grid(row=0, column=2, padx=6, pady=2)
+        ).grid(row=0, column=16, padx=6, pady=2)
 
         self.peak_fit_results_frame = ttk.Frame(fitting_panel)
-        self.peak_fit_results_frame.grid(row=2, column=0, sticky="ew", pady=(2, 0))
+        self.peak_fit_results_frame.grid(row=1, column=0, sticky="ew", pady=(2, 0))
         self.peak_fit_results_frame.grid_columnconfigure(0, weight=1)
         self.peak_fit_summary_var = tk.StringVar(value="Peak fit parameters: not fitted")
         ttk.Label(self.peak_fit_results_frame, textvariable=self.peak_fit_summary_var).grid(
@@ -1060,12 +1070,14 @@ class TIFFAnalyzer:
         ttk.Button(frame, text="Import Cal.", command=self.import_calibration).grid(row=0, column=0, padx=5, pady=5, sticky="w")
         ttk.Button(frame, text="Fit Cal.", command=self.fit_calibration_spectrum).grid(row=0, column=1, padx=5, pady=5, sticky="w")
         ttk.Button(frame, text="Calc Map", command=self.calculate_energy_calibration).grid(row=0, column=2, padx=5, pady=5, sticky="w")
-        ttk.Button(frame, text="Apply Cal.", command=self.apply_energy_calibration).grid(row=0, column=3, padx=5, pady=5, sticky="w")
+        ttk.Separator(frame, orient=tk.VERTICAL).grid(row=0, column=3, sticky="ns", padx=(8, 8), pady=5)
         ttk.Button(frame, text="Show Cal. Fit", command=self.show_calibration_fit).grid(row=0, column=4, padx=5, pady=5, sticky="w")
         ttk.Button(frame, text="Compare Cal.", command=self.compare_calibration_overlay).grid(row=0, column=5, padx=5, pady=5, sticky="w")
-        ttk.Button(frame, text="Save Cal.", command=self.save_calibrated_spectrum_data).grid(row=0, column=6, padx=5, pady=5, sticky="w")
+        ttk.Separator(frame, orient=tk.VERTICAL).grid(row=0, column=6, sticky="ns", padx=(8, 8), pady=5)
+        ttk.Button(frame, text="Apply Cal.", command=self.apply_energy_calibration).grid(row=0, column=7, padx=5, pady=5, sticky="w")
+        ttk.Button(frame, text="Export Cal.", command=self.save_calibrated_spectrum_data).grid(row=0, column=8, padx=5, pady=5, sticky="w")
         self.calibration_file_label = ttk.Label(frame, text="No calibration file loaded")
-        self.calibration_file_label.grid(row=0, column=7, columnspan=3, padx=8, pady=5, sticky="w")
+        self.calibration_file_label.grid(row=0, column=9, columnspan=3, padx=8, pady=5, sticky="w")
 
         fit_range = ttk.Frame(frame)
         fit_range.grid(row=1, column=0, columnspan=8, sticky="w", padx=5, pady=(2, 5))
@@ -1126,18 +1138,25 @@ class TIFFAnalyzer:
         ttk.Button(self.iad_toolbar, text="Import Ref.", command=self.import_ref_data).grid(row=0, column=0, padx=5)
         ttk.Button(self.iad_toolbar, text="Remove", command=self.remove_selected_line).grid(row=0, column=1, padx=5)
         ttk.Button(self.iad_toolbar, text="Color", command=self.change_selected_line_color).grid(row=0, column=2, padx=5)
-        ttk.Button(self.iad_toolbar, text="Integrated Diff.", command=self.plot_integrated_diff).grid(row=0, column=3, padx=5)
-        
-        # Second row (Satellite Diff. and cross entries)
-        second_row_frame = ttk.Frame(frame)
-        second_row_frame.grid(row=1, column=0, sticky='w', padx=5, pady=5)
 
-        ttk.Button(second_row_frame, text="Satellite Diff.", command=self.calculate_and_display_satellite_peak_iad).grid(row=0, column=0, padx=5)
+        iad_action_row = ttk.Frame(frame)
+        iad_action_row.grid(row=1, column=0, sticky='w', padx=5, pady=(0, 5))
+        ttk.Button(iad_action_row, text="IAD", command=self.plot_integrated_diff).grid(row=0, column=0, padx=5)
+        ttk.Button(iad_action_row, text="IAD Error", command=self.calculate_iad_error).grid(row=0, column=1, padx=5)
+        ttk.Separator(iad_action_row, orient=tk.VERTICAL).grid(row=0, column=2, sticky="ns", padx=(8, 8), pady=2)
+        ttk.Button(iad_action_row, text="Satellite IAD", command=self.calculate_and_display_satellite_peak_iad).grid(row=0, column=3, padx=5)
+        ttk.Button(iad_action_row, text="Satellite IAD error", command=self.calculate_satellite_iad_error).grid(row=0, column=4, padx=5)
+        ttk.Separator(iad_action_row, orient=tk.VERTICAL).grid(row=0, column=5, sticky="ns", padx=(8, 8), pady=2)
+        ttk.Button(iad_action_row, text="Export IAD Values", command=self.save_iad_results).grid(row=0, column=6, padx=5)
         
-        # Spectra Cross (with entries)
+        # Crossing range and manual crossing entries.
+        second_row_frame = ttk.Frame(frame)
+        second_row_frame.grid(row=2, column=0, sticky='w', padx=5, pady=5)
+        
+        # Spectra crossing range.
         spectra_cross_frame = ttk.Frame(second_row_frame)
-        spectra_cross_frame.grid(row=0, column=1, padx=5, pady=5)
-        ttk.Label(spectra_cross_frame, text="Spectra Cross:").grid(row=0, column=0, padx=5)
+        spectra_cross_frame.grid(row=0, column=0, padx=5, pady=5)
+        ttk.Label(spectra_cross_frame, text="Spectra Crossing Range:").grid(row=0, column=0, padx=5)
         self.cross_begin = ttk.Entry(spectra_cross_frame, width=4)
         self.cross_begin.insert(0, str(self.parm['PK intersect']['i_l']))
         self.cross_begin.grid(row=0, column=1, padx=5)
@@ -1146,10 +1165,10 @@ class TIFFAnalyzer:
         self.cross_end.insert(0, str(self.parm['PK intersect']['i_r']))
         self.cross_end.grid(row=0, column=3, padx=5)
         
-        # Eye Ball Cross (with entries)
+        # Manual crossing.
         eyeball_cross_frame = ttk.Frame(second_row_frame)
-        eyeball_cross_frame.grid(row=0, column=2, padx=5, pady=5)
-        ttk.Label(eyeball_cross_frame, text="Eye Ball Cross:").grid(row=0, column=0, padx=5)
+        eyeball_cross_frame.grid(row=0, column=1, padx=5, pady=5)
+        ttk.Label(eyeball_cross_frame, text="Manual crossing:").grid(row=0, column=0, padx=5)
         self.eye_ball_cross = ttk.Entry(eyeball_cross_frame, width=4)
         eye_ball_val = self.parm.get('eye_ball_cross', 0)
         if eye_ball_val is None:
@@ -1160,7 +1179,7 @@ class TIFFAnalyzer:
 
         # List of plotted lines (to be placed in the first row)
         self.line_list_frame = ttk.Frame(frame)
-        self.line_list_frame.grid(row=2, column=0, columnspan=4, sticky='w', padx=5, pady=5)  # Ensure it's below the second row
+        self.line_list_frame.grid(row=3, column=0, columnspan=4, sticky='w', padx=5, pady=5)  # Ensure it's below the second row
         self.plotted_lines = {}
         
     def setup_display_area(self):
@@ -1196,6 +1215,7 @@ class TIFFAnalyzer:
         self.image_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         self.image_frame.pack_propagate(False)
         self.run_number_label = ttk.Label(self.image_frame, text="Run: Not Loaded", font=("Arial", 16))
+        self.run_number_label.pack(side=tk.TOP, padx=5, pady=(0, 1))
         self.image_title_label = ttk.Label(
             self.image_frame,
             text="No image loaded",
@@ -1236,6 +1256,29 @@ class TIFFAnalyzer:
         self.canvas_image = FigureCanvasTkAgg(self.fig_image, master=self.image_plot_frame)
         self.canvas_image.get_tk_widget().configure(bg='white', highlightthickness=0, bd=0)
         self.canvas_image.get_tk_widget().grid(row=0, column=1, sticky="nsew")
+
+        self.image_display_controls = ttk.Frame(self.image_frame, style="White.TFrame")
+        self.image_display_controls.pack(side=tk.BOTTOM, anchor="w", padx=5, pady=(4, 2))
+        ttk.Label(self.image_display_controls, text="vmin:", style="White.TLabel").grid(row=0, column=0, padx=(0, 6), pady=2)
+        self.vmin_entry = ttk.Entry(self.image_display_controls, width=4, font=('Arial', 12))
+        self.vmin_entry.insert(0, str(self.parm['vmin']))
+        self.vmin_entry.grid(row=0, column=1, padx=(0, 14), pady=2)
+
+        ttk.Label(self.image_display_controls, text="vmax:", style="White.TLabel").grid(row=0, column=2, padx=(0, 6), pady=2)
+        self.vmax_entry = ttk.Entry(self.image_display_controls, width=4, font=('Arial', 12))
+        self.vmax_entry.insert(0, str(self.parm['vmax']))
+        self.vmax_entry.grid(row=0, column=3, padx=(0, 14), pady=2)
+
+        ttk.Label(self.image_display_controls, text="Cmap:", style="White.TLabel").grid(row=0, column=4, padx=(0, 6), pady=2)
+        self.image_cmap = ttk.Combobox(
+            self.image_display_controls,
+            values=["viridis", "plasma", "inferno", "magma", "cividis", "gray", "Greys", "turbo"],
+            width=10,
+            state="readonly",
+        )
+        self.image_cmap.set(self.parm.get('cmap', 'viridis'))
+        self.image_cmap.grid(row=0, column=5, padx=(0, 0), pady=2)
+        self.image_cmap.bind("<<ComboboxSelected>>", lambda event: self.update_image_cmap())
 
         self.image_xlabel_label = ttk.Label(
             self.image_frame,
@@ -1326,7 +1369,7 @@ class TIFFAnalyzer:
         self.spectrum_view_buttons = {}
         view_specs = (
             ("original", "Original", 7, self.show_original_spectrum),
-            ("corrected", "Gap C.", 6, self.show_gap_corrected_spectrum),
+            ("corrected", "Corrected", 6, self.show_gap_corrected_spectrum),
             ("fit", "Peak fit", 7, self.show_peak_fit_view),
             ("calibration", "Calibration", 9, self.show_calibrated_spectrum_view),
         )
@@ -1776,8 +1819,10 @@ class TIFFAnalyzer:
         """Clear stale spectrum state when a new TIFF is loaded."""
         self.spect_processor = None
         self.bg_subtraction_enabled = False
+        if hasattr(self, 'bg_subtraction_var'):
+            self.bg_subtraction_var.set(False)
         if hasattr(self, 'bg_toggle'):
-            self.bg_toggle.config(style='TButton', text="BG Remove (OFF)")
+            self.bg_toggle.config(style='TButton', text="BG Remove")
         for attr_name in (
             'last_spectrum_roi',
             'last_spectrum_roi_uncorrected',
@@ -1883,10 +1928,16 @@ class TIFFAnalyzer:
         return iad_controls.toggle_line_visibility(self, line_name, checkbox_var)
     def plot_integrated_diff(self):
         return iad_controls.plot_integrated_diff(self)
+    def calculate_iad_error(self):
+        messagebox.showinfo("IAD Error", "IAD Error is available in the Qt interface.")
     def plot_fitted_integrated_diff(self):
         return iad_controls.plot_fitted_integrated_diff(self)
     def calculate_and_display_satellite_peak_iad(self):
         return iad_controls.calculate_and_display_satellite_peak_iad(self)
+    def calculate_satellite_iad_error(self):
+        messagebox.showinfo("Satellite IAD error", "Satellite IAD error is available in the Qt interface.")
+    def save_iad_results(self):
+        messagebox.showinfo("Export IAD Values", "Export IAD Values is available in the Qt interface.")
     def calculate_and_display_fitted_satellite_peak_iad(self):
         return iad_controls.calculate_and_display_fitted_satellite_peak_iad(self)
     def pick_ref_color(self):

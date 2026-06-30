@@ -202,6 +202,13 @@ def import_calibration(self):
     _set_var(getattr(self, "cal_slope_var", None), np.nan)
     _set_var(getattr(self, "cal_intercept_var", None), np.nan)
     _set_var(getattr(self, "cal_residual_var", None), np.nan)
+    if hasattr(self, "ax_spectrum"):
+        self.ax_spectrum.clear()
+        self.ax_spectrum.plot(x_data, y_data, color="#8db7ff", linewidth=1.0, label=f"Cal, {os.path.basename(filepath)}")
+        if hasattr(_spectrum_view, "_finish_spectrum_axes"):
+            _spectrum_view._finish_spectrum_axes(self, xlabel="Energy", ylabel="Intensity", view_mode="calibration", view_label="Calibration")
+        elif hasattr(self, "canvas_spectrum"):
+            self.canvas_spectrum.draw_idle()
 
 
 def fit_calibration_spectrum(self):
@@ -429,7 +436,7 @@ def save_calibrated_spectrum_data(self):
     if calibration is None:
         return
     if not hasattr(self, "last_spectrum_roi"):
-        messagebox.showwarning("Save Cal.", "Plot the current spectrum first.")
+        messagebox.showwarning("Export Cal.", "Plot the current spectrum first.")
         return
 
     y_data = np.asarray(self.last_spectrum_roi, dtype=float)
@@ -481,7 +488,7 @@ def save_calibrated_spectrum_data(self):
             self.cal_status_var.set(f"Calibrated spectrum saved: {os.path.basename(save_path)}")
         print(f"Calibrated spectrum saved to {save_path}")
     except Exception as exc:
-        messagebox.showwarning("Save Cal.", f"Could not save calibrated spectrum:\n{exc}")
+        messagebox.showwarning("Export Cal.", f"Could not save calibrated spectrum:\n{exc}")
         print(f"Error saving calibrated spectrum: {exc}")
 
 

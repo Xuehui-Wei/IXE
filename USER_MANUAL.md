@@ -9,7 +9,7 @@ calibration, and project save/open.
 Run the current Qt/pyqtgraph GUI from the repository root:
 
 ```bash
-python IXE/qt_analyzer.py
+python IXE/xes_app.py
 ```
 
 If IXE was installed with `pip install -e .`, you can also start the same Qt
@@ -62,7 +62,8 @@ below:
 11. If several fitted reference spectra are available, use **Spectrum
     Analysis** -> **Reference** to average them before IAD.
 12. For IAD, go to **IAD Calculation**, import a reference with **Import Ref.**,
-    then click **Integrated Diff.** or **Satellite Diff.**
+    click **Integrated Diff.** for the fast value, and click **IAD Error** when
+    final Monte Carlo uncertainty is needed.
 13. For energy calibration, go to **Calibration**, import and fit a calibrant,
     calculate the map, apply it, then save with **Save Cal.**
 14. Click **Save Project** or the top **Save** button to store the whole
@@ -229,6 +230,12 @@ Recommended fitting options:
 - **Tail Baseline**: estimates a linear baseline from the left and right tails,
   subtracts it for fitting, and plots the corrected spectrum with the fitted
   profile. Use this when one tail is clearly higher than the other.
+- **Fit error**: reports the normalized fit residual,
+  `integral(abs(ROI corrected - Peak fit)) / integral(abs(ROI corrected))`.
+  This is a fit-quality metric, not a full counting-statistics uncertainty.
+  The peak-fit plot also shows a scaled residual band below the spectrum:
+  violet means `ROI corrected > Peak fit`, and rose means `Peak fit > ROI
+  corrected`.
 
 ### Save pkfit
 
@@ -243,6 +250,8 @@ The saved file includes:
 - `Tail baseline`, when tail baseline correction was used;
 - `Corrected Y`, when tail baseline correction was used;
 - `Peak fit`;
+- `Fit residual`;
+- `Normalized residual`;
 - the fitted component columns.
 
 ### Save Spectrum
@@ -317,6 +326,7 @@ that by aligning references internally before averaging.
    - **Use** controls whether a spectrum is included.
    - **Run** shows the run number or reference label.
    - **Kbeta 1,3 px** shows the fitted main-peak position.
+   - **Fit error** shows the normalized fit residual saved in each pkfit file.
    - **Shift** shows the alignment shift used internally.
 5. Check only the references that should contribute to the average.
 6. Click **Average**.
@@ -352,7 +362,7 @@ so it can be imported directly in **IAD Calculation**. The file includes:
 - `Area normalized True`;
 - number of averaged spectra;
 - target Kbeta 1,3 position;
-- input run numbers and shifts;
+- input run numbers, fit errors, and shifts;
 - `X` and `Peak fit` columns for IAD.
 
 When this file is imported in the IAD panel, the legend/table label is shown as
@@ -382,7 +392,9 @@ Imported references appear in the IAD panel with:
 - checkbox for visibility;
 - color marker;
 - IAD value field;
+- IAD error field;
 - satellite IAD value field.
+- satellite IAD error field.
 
 ### Remove
 
@@ -405,6 +417,38 @@ For peak-fit references, the comparison uses fitted peak profiles. Before IAD,
 the current and reference spectra are aligned to a common x grid, baseline
 matched when enabled, and area-normalized over the valid comparison range.
 
+This button is fast and does not run the Monte Carlo uncertainty calculation.
+
+### IAD Error
+
+Runs the slower Monte Carlo re-fit uncertainty calculation for the checked
+reference rows. Use **MC trials** to choose the number of trial spectra. The
+default is 100 trials for routine use; larger values are better for final
+publication numbers but take longer.
+
+The **IAD error** column is filled from:
+
+```text
+1. residual = ROI corrected - Peak fit
+2. create repeated trial spectra by resampling the residual
+3. re-fit each trial spectrum with the same peak-fit settings
+4. recalculate IAD for each refitted trial
+5. sample_MC_error = standard deviation of trial IAD values
+```
+
+The displayed/saved IAD error then combines the sample Monte Carlo term with the
+averaged-reference scatter term:
+
+```text
+IAD error = sqrt(sample_MC_error^2 + reference_mean_scatter_error^2)
+```
+
+`reference_mean_scatter_error` is calculated from the saved `Std / sqrt(Valid
+N)` values in the averaged reference file. The older absolute residual-area
+score is still saved as a diagnostic fit-quality score, but it is no longer used
+directly as the IAD uncertainty because it is intentionally conservative for
+noisy spectra.
+
 ### Satellite Diff.
 
 Calculates the IAD only over the satellite side of the spectrum. The current and
@@ -412,9 +456,31 @@ reference spectra are aligned by their main peak, baseline matched when enabled,
 area-normalized over the valid comparison range, plotted together, and only the
 satellite difference area is shaded.
 
+This button is the fast satellite-value calculation. It does not run the Monte
+Carlo uncertainty calculation.
+
 Use **Spectra Cross** to define the window where the transition/crossing point
 between spectra should be found. The crossing search works no matter which
 spectrum is shifted left or right relative to the other.
+
+### Sat. Error
+
+Runs the satellite-IAD Monte Carlo uncertainty calculation for the checked
+reference rows. It uses the same residual-resampling and re-fit strategy as
+**IAD Error**, but recalculates the satellite crossing point for each trial fit.
+
+The displayed/saved satellite error is:
+
+```text
+Satellite IAD error =
+sqrt(satellite_sample_MC_error^2 + satellite_reference_scatter_error^2)
+```
+
+`satellite_sample_MC_error` is the standard deviation of satellite IAD values
+from the refitted trial spectra. `satellite_reference_scatter_error` comes from
+the averaged-reference `Std / sqrt(Valid N)` term, integrated only over the
+satellite-side fraction used for the satellite IAD. Use **MC trials** to control
+the number of trial spectra.
 
 ### Spectra Cross
 
@@ -429,8 +495,9 @@ crossing automatically from **Spectra Cross**.
 ### Save IAD
 
 Saves calculated IAD results as a text file. The output includes the current run,
-reference run or reference label, full-spectrum IAD, satellite IAD, satellite
-cross point, and reference file path.
+reference run or reference label, full-spectrum IAD, the MC re-fit IAD error,
+MC trial summary values, reference scatter/fit diagnostic terms, satellite IAD,
+satellite IAD error field, satellite cross point, and reference file path.
 
 ## 9. Calibration Panel
 

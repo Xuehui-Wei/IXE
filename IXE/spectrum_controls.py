@@ -150,9 +150,23 @@ def _format_fit_value(value):
     return f"{value:.6g}"
 
 
+def _format_fit_error(value):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if not np.isfinite(value):
+        return ""
+    if value < 0.001:
+        return f"{value:.3e}"
+    return f"{100.0 * value:.2f}%"
+
+
 def _clear_peak_fit_results_box(self):
     if hasattr(self, 'peak_fit_summary_var'):
         self.peak_fit_summary_var.set("Peak fit parameters: not fitted")
+    if hasattr(self, 'peak_fit_error_var'):
+        self.peak_fit_error_var.set("")
     if hasattr(self, 'peak_fit_table'):
         for item in self.peak_fit_table.get_children():
             self.peak_fit_table.delete(item)
@@ -169,6 +183,8 @@ def _update_peak_fit_results_box(self, fit_result):
             self.peak_fit_summary_var.set(f"Pseudo-Voigt fit; Lorentzian components: {len(rows)}")
         else:
             self.peak_fit_summary_var.set(f"Lorentzian fit; components: {len(rows)}")
+    if hasattr(self, 'peak_fit_error_var'):
+        self.peak_fit_error_var.set(_format_fit_error(getattr(fit_result, 'relative_fit_error', np.nan)))
     for label, model_label, fraction, center, width, area in rows:
         self.peak_fit_table.insert(
             "",
@@ -788,8 +804,8 @@ def _finish_spectrum_axes(self, xlabel="Column Index", ylabel="Normalized intens
 
 def plot_roi_spectrum(self, line_color=None, line_style=None, line_width=None):
     """Plot the spectrum for the selected ROI with custom line style, color, and width."""
-    if not hasattr(self, 'spect_processor'):
-        print("Error: Process the image first")
+    if not hasattr(self, 'spect_processor') or self.spect_processor is None:
+        print("Error: Import an image first")
         return
 
     try:
@@ -823,6 +839,10 @@ def plot_roi_spectrum(self, line_color=None, line_style=None, line_width=None):
             print("Invalid line width value. Using default.")
             line_width = 0.5  # Default value if invalid input
 
+        run_label = f"Run {self.run_number_label.cget('text').split(': ')[1]}"
+        if getattr(self, 'gap_correction_enabled', False) or getattr(self, 'bg_subtraction_enabled', False):
+            run_label = f"Corrected, {run_label}"
+
         # Plot the spectrum with the specified color, style, and width.
         self.ax_spectrum.plot(
             x_data,
@@ -830,9 +850,8 @@ def plot_roi_spectrum(self, line_color=None, line_style=None, line_width=None):
             color=line_color,
             linestyle=line_style,
             linewidth=line_width,
-            label=f"Run {self.run_number_label.cget('text').split(': ')[1]}",
+            label=run_label,
         )
-        _plot_gap_markers(self, x_data, norm_spectrum)
         _finish_spectrum_axes(self, view_mode='corrected', view_label='Corrected spectrum')
     except Exception as e:
         print(f"Error plotting spectrum: {e}")
@@ -869,9 +888,8 @@ def show_gap_corrected_spectrum(self):
         y_data,
         color=line_color,
         linewidth=0.8,
-        label="Gap-corrected",
+        label="Corrected",
     )
-    _plot_gap_markers(self, x_data, y_data)
     _finish_spectrum_axes(self, view_mode='corrected', view_label='Corrected spectrum')
 
 
@@ -944,8 +962,8 @@ def open_color_picker(self):
         
 def apply_moving_average(self):
     """Apply moving average to the spectrum data and update the plot."""
-    if not hasattr(self, 'spect_processor'):
-        print("Error: Process the image first")
+    if not hasattr(self, 'spect_processor') or self.spect_processor is None:
+        print("Error: Import an image first")
         return
 
     try:
@@ -991,15 +1009,18 @@ def apply_moving_average(self):
         # Update title to reflect if BG is removed
         self.ax_spectrum.set_title("")
         
+        run_label = f"Run {self.run_number_label.cget('text').split(': ')[1]}"
+        if getattr(self, 'gap_correction_enabled', False) or getattr(self, 'bg_subtraction_enabled', False):
+            run_label = f"Corrected, {run_label}"
+
         self.ax_spectrum.plot(
             x_data,
             norm_smoothed_spectrum,
             color=self.line_color.get(),
             linestyle=self.line_style.get(),
             linewidth=float(self.line_width.get()),
-            label=f"Run {self.run_number_label.cget('text').split(': ')[1]}",
+            label=run_label,
         )
-        _plot_gap_markers(self, x_data, norm_smoothed_spectrum)
         _finish_spectrum_axes(self, view_mode='corrected', view_label='Smoothed spectrum')
 
     except Exception as e:
@@ -1046,7 +1067,7 @@ def show_peak_fit_profile(self):
             color='0.45',
             linewidth=0.8,
             alpha=0.9,
-            label="Gap-corrected",
+            label="Corrected",
         )
     self.ax_spectrum.plot(
         fit_result.x,
@@ -1086,18 +1107,16 @@ def show_peak_fit_profile(self):
 def toggle_gap_correction(self):
     """Toggle mask-aware CCD gap handling before spectrum normalization."""
     gap_defaults = self.parm.setdefault('ccd_gap', {}) if hasattr(self, 'parm') else {}
-    current = getattr(self, 'gap_correction_enabled', gap_defaults.get('enabled', True))
-    self.gap_correction_enabled = not bool(current)
+    if hasattr(self, 'gap_correction_var'):
+        self.gap_correction_enabled = bool(self.gap_correction_var.get())
+    else:
+        current = getattr(self, 'gap_correction_enabled', gap_defaults.get('enabled', True))
+        self.gap_correction_enabled = not bool(current)
     gap_defaults['enabled'] = self.gap_correction_enabled
     if hasattr(self, 'spect_processor') and self.spect_processor is not None:
         _configure_gap_correction(self)
-    if hasattr(self, 'gap_toggle'):
-        _set_toggle_button_state(
-            self.gap_toggle,
-            self.gap_correction_enabled,
-            "Gap Mask (ON)",
-            "Gap Mask (OFF)",
-        )
+    if hasattr(self, 'gap_correction_var') and self.gap_correction_var.get() != self.gap_correction_enabled:
+        self.gap_correction_var.set(self.gap_correction_enabled)
     if hasattr(self, 'last_spectrum_roi'):
         self.plot_roi_spectrum()
 
@@ -1120,15 +1139,15 @@ def toggle_trace_extraction(self):
 
 def toggle_background_removal(self):
     """Toggle background subtraction on/off."""
-    self.bg_subtraction_enabled = not self.bg_subtraction_enabled
-    if self.bg_subtraction_enabled:
-        _set_toggle_button_state(self.bg_toggle, True, "BG Remove (ON)", "BG Remove (OFF)")
+    if hasattr(self, 'bg_subtraction_var'):
+        self.bg_subtraction_enabled = bool(self.bg_subtraction_var.get())
     else:
-        _set_toggle_button_state(self.bg_toggle, False, "BG Remove (ON)", "BG Remove (OFF)")
-    if not hasattr(self, 'spect_processor'):
-        print("Error: Process the image first")
+        self.bg_subtraction_enabled = not self.bg_subtraction_enabled
+    if not hasattr(self, 'spect_processor') or self.spect_processor is None:
+        print("Error: Import an image first")
         self.bg_subtraction_enabled = False
-        _set_toggle_button_state(self.bg_toggle, False, "BG Remove (ON)", "BG Remove (OFF)")
+        if hasattr(self, 'bg_subtraction_var'):
+            self.bg_subtraction_var.set(False)
         return
     try:
         bg_ranges = self.get_bg_row_ranges() if hasattr(self, 'get_bg_row_ranges') else [self.get_bg_row_range()]
@@ -1153,11 +1172,13 @@ def toggle_background_removal(self):
     except ValueError as ve:
         print(f"Invalid background ROI: {ve}")
         self.bg_subtraction_enabled = False
-        _set_toggle_button_state(self.bg_toggle, False, "BG Remove (ON)", "BG Remove (OFF)")
+        if hasattr(self, 'bg_subtraction_var'):
+            self.bg_subtraction_var.set(False)
     except Exception as e:
         print(f"Error toggling background removal: {e}")
         self.bg_subtraction_enabled = False
-        _set_toggle_button_state(self.bg_toggle, False, "BG Remove (ON)", "BG Remove (OFF)")
+        if hasattr(self, 'bg_subtraction_var'):
+            self.bg_subtraction_var.set(False)
 
 def save_spectrum_data(self):
     """Save the spectrum currently displayed in the GUI."""
@@ -1228,7 +1249,7 @@ def save_smoothed_spectrum_data(self):
 def save_peak_fit_parameters(self):
     """Save fitted peak position, width, area, and Lorentzian fraction."""
     if not hasattr(self, 'last_peak_fit_profile'):
-        messagebox.showwarning("Save params", "Run Peak Fit before saving peak parameters.")
+        messagebox.showwarning("Export Params", "Run Peak Fit before exporting peak parameters.")
         return
 
     try:
@@ -1265,7 +1286,7 @@ def save_peak_fit_parameters(self):
 def save_peak_fit_data(self):
     """Save the most recent fitted peak profile and components."""
     if not hasattr(self, 'last_peak_fit_profile'):
-        messagebox.showwarning("Save pkfit", "Run Peak Fit before saving the fitted profile.")
+        messagebox.showwarning("Export PKfit", "Run Peak Fit before exporting the fitted profile.")
         return
 
     try:
@@ -1274,7 +1295,7 @@ def save_peak_fit_data(self):
         raw_y = np.asarray(fit_result.raw_y, dtype=float)
         fit_y = np.asarray(fit_result.normalized_fit, dtype=float)
         if x_data.size == 0 or fit_y.size == 0:
-            messagebox.showwarning("Save pkfit", "Peak fit profile is empty.")
+            messagebox.showwarning("Export PKfit", "Peak fit profile is empty.")
             return
 
         scale = _component_scale(fit_result)

@@ -30,6 +30,38 @@ def _normalize_peak_shape(peak_shape):
     raise PeakFitError("Peak model must be pseudo-Voigt or Lorentzian.")
 
 
+def _trapz_area(x, y):
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    finite = np.isfinite(x) & np.isfinite(y)
+    if finite.sum() >= 2:
+        try:
+            return float(np.trapezoid(y[finite], x[finite]))
+        except AttributeError:  # pragma: no cover - NumPy < 2.0
+            return float(np.trapz(y[finite], x[finite]))
+    if finite.sum() == 1:
+        return float(y[finite][0])
+    return np.nan
+
+
+def _fit_error_metrics(x, data_y, model_y):
+    x = np.asarray(x, dtype=float)
+    data_y = np.asarray(data_y, dtype=float)
+    model_y = np.asarray(model_y, dtype=float)
+    if x.shape != data_y.shape or data_y.shape != model_y.shape:
+        return np.nan, np.nan, np.nan
+    residual = data_y - model_y
+    residual_area = _trapz_area(x, np.abs(residual))
+    total_intensity = _trapz_area(x, np.abs(data_y))
+    if not np.isfinite(total_intensity) or total_intensity <= _EPS:
+        total_intensity = float(np.nansum(np.abs(data_y)))
+    if not np.isfinite(residual_area):
+        residual_area = float(np.nansum(np.abs(residual)))
+    if not np.isfinite(total_intensity) or total_intensity <= _EPS:
+        return residual_area, total_intensity, np.nan
+    return residual_area, total_intensity, float(residual_area / total_intensity)
+
+
 class PeakFitConfig:
     def __init__(
         self,
@@ -102,6 +134,19 @@ class PeakFitResult:
         self.physical_fit = bool(physical_fit)
         self.tail_baseline_enabled = bool(tail_baseline_enabled)
         self.tail_fraction = _clamp(tail_fraction, 0.03, 0.30)
+        if self.fit_y.shape == self.normalized_fit.shape:
+            self.fit_residual = self.fit_y - self.normalized_fit
+        else:
+            self.fit_residual = np.full_like(self.normalized_fit, np.nan, dtype=float)
+        self.fit_residual_area, self.fit_total_intensity, self.relative_fit_error = _fit_error_metrics(
+            self.x,
+            self.fit_y,
+            self.normalized_fit,
+        )
+        if np.isfinite(self.fit_total_intensity) and abs(self.fit_total_intensity) > _EPS:
+            self.normalized_fit_residual = self.fit_residual / self.fit_total_intensity
+        else:
+            self.normalized_fit_residual = np.full_like(self.fit_residual, np.nan, dtype=float)
 
 
 class FittedIADResult:

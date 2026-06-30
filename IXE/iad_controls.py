@@ -138,14 +138,14 @@ def _get_satellite_controls(self, spectrum_len):
         cross_begin = int(self.cross_begin.get())
         cross_end = int(self.cross_end.get())
     except ValueError:
-        messagebox.showwarning("Satellite IAD", "Spectra Cross values must be integers.")
+        messagebox.showwarning("Satellite IAD", "Spectra Crossing Range values must be integers.")
         return None
 
     max_index = max(int(spectrum_len) - 1, 0)
     cross_begin = max(0, min(cross_begin, max_index))
     cross_end = max(0, min(cross_end, max_index))
     if cross_end <= cross_begin:
-        messagebox.showwarning("Satellite IAD", "Spectra Cross end must be greater than the start.")
+        messagebox.showwarning("Satellite IAD", "Spectra Crossing Range end must be greater than the start.")
         return None
 
     eyeball_str = self.eye_ball_cross.get().strip()
@@ -857,7 +857,7 @@ def plot_integrated_diff(self):
     self.ax_spectrum.clear()
     self.ax_spectrum.plot(ref_x, ref_y, color=ref_line['color'], linewidth=0.5, label=ref_label)
     self.ax_spectrum.plot(ref_x, roi_y, color=roi_color, linewidth=0.5, label=roi_label)
-    _plot_signed_iad_difference(self, ref_x, roi_y, ref_y, ref_line['color'], label="Integrated Diff.")
+    _plot_signed_iad_difference(self, ref_x, roi_y, ref_y, ref_line['color'], label="IAD")
     _spectrum_view._finish_spectrum_axes(
         self,
         xlabel="Column Index",
@@ -937,12 +937,12 @@ def calculate_and_display_satellite_peak_iad(self):
         except ValueError as exc:
             messagebox.showwarning("Satellite IAD", str(exc))
             return
-        diff_label = "Fitted Satellite Diff."
+        diff_label = "Fitted Satellite IAD"
         line_width = 1.0
         ref_line['satellite_tail_matched'] = tail_matched
     else:
         iad_satellite, transition_point, spec_align, spec_r_align = self.spect_processor.calculate_satellite_peak_iad(roi_y, ref_y, cross_begin, cross_end, eyeball_point)
-        diff_label = "Satellite Diff."
+        diff_label = "Satellite IAD"
         line_width = 0.5
     self.ax_spectrum.clear()
     roi_color = self.line_color.get() if hasattr(self, 'line_color') else 'black'
@@ -1005,7 +1005,7 @@ def calculate_and_display_fitted_satellite_peak_iad(self):
         spec_align[:transition_point],
         spec_r_align[:transition_point],
         ref_line['color'],
-        label="Fitted Satellite Diff.",
+        label="Fitted Satellite IAD",
     )
     _spectrum_view._finish_spectrum_axes(
         self,

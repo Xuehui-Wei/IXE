@@ -45,6 +45,9 @@ pg.setConfigOptions(antialias=True, imageAxisOrder='row-major')
 _QT_SIGNAL = getattr(QtCore, 'Signal', getattr(QtCore, 'pyqtSignal'))
 PROJECT_FORMAT = "IXE Project"
 PROJECT_VERSION = 1
+IAD_MC_DEFAULT_TRIALS = 100
+IAD_MC_MIN_SUCCESS = 40
+IAD_MC_SEED = 20260612
 
 
 def _left_mouse_button():
@@ -53,6 +56,10 @@ def _left_mouse_button():
 
 def _pointing_cursor():
     return getattr(getattr(QtCore.Qt, 'CursorShape', QtCore.Qt), 'PointingHandCursor')
+
+
+def _wait_cursor():
+    return getattr(getattr(QtCore.Qt, 'CursorShape', QtCore.Qt), 'WaitCursor')
 
 
 def _painter_antialiasing():
@@ -174,10 +181,114 @@ def _extract_pkfit_xy(rows):
     y = y[finite]
     if x.size < 2:
         raise ValueError(
-            "Import Ref. expects a pkfit file saved by Save pkfit with numeric X and Peak fit columns."
+            "Import Ref. expects a pkfit file exported by Export PKfit with numeric X and Peak fit columns."
         )
     order = np.argsort(x)
     return x[order], y[order], header_index, header
+
+
+def _extract_pkfit_fit_error(rows):
+    return _extract_pkfit_scalar(rows, ("fit error", "relative fit error"))
+
+
+def _extract_pkfit_scalar(rows, keys):
+    normalized_keys = {_header_name(key) for key in keys}
+    for row in rows:
+        if len(row) < 2:
+            continue
+        key = _header_name(row[0])
+        if key not in normalized_keys:
+            continue
+        value = _as_float(row[1])
+        if value is not None and np.isfinite(value):
+            return float(value)
+    return np.nan
+
+
+def _extract_pkfit_input_reference_fit_errors(rows):
+    in_input_block = False
+    fit_error_column = None
+    fit_errors = []
+    for row in rows:
+        normalized = [_header_name(value) for value in row]
+        row_label = _header_name(" ".join(str(value) for value in row))
+        if not normalized:
+            continue
+        if row_label == "input references":
+            in_input_block = True
+            fit_error_column = None
+            continue
+        if not in_input_block:
+            continue
+        if row_label == "peak parameters" or _is_spectrum_table_header(row):
+            break
+        if fit_error_column is None:
+            if "fit error" in normalized:
+                fit_error_column = normalized.index("fit error")
+            elif "relative fit error" in normalized:
+                fit_error_column = normalized.index("relative fit error")
+            continue
+        if len(row) <= fit_error_column:
+            continue
+        value = _as_float(row[fit_error_column])
+        if value is not None and np.isfinite(value):
+            fit_errors.append(float(value))
+    return np.asarray(fit_errors, dtype=float)
+
+
+def _extract_pkfit_table_columns(rows, column_candidates):
+    for row_index, row in enumerate(rows):
+        if not row or not _is_spectrum_table_header(row):
+            continue
+        normalized = [_header_name(value) for value in row]
+        indices = {}
+        for key, candidates in column_candidates.items():
+            for candidate in candidates:
+                candidate = _header_name(candidate)
+                if candidate in normalized:
+                    indices[key] = normalized.index(candidate)
+                    break
+        if "x" not in indices:
+            continue
+        values = {key: [] for key in indices}
+        for data_row in rows[row_index + 1:]:
+            if len(data_row) <= max(indices.values()):
+                continue
+            x_value = _as_float(data_row[indices["x"]])
+            if x_value is None:
+                continue
+            for key, column in indices.items():
+                value = _as_float(data_row[column])
+                values[key].append(np.nan if value is None else float(value))
+        if len(values.get("x", [])) >= 2:
+            return {key: np.asarray(column_values, dtype=float) for key, column_values in values.items()}
+    return {}
+
+
+def _extract_pkfit_average_scatter_error(rows):
+    columns = _extract_pkfit_table_columns(
+        rows,
+        {
+            "x": ("x", "energy"),
+            "mean": ("peak fit", "y", "raw y", "intensity"),
+            "std": ("std",),
+            "valid_n": ("valid n",),
+        },
+    )
+    if not all(key in columns for key in ("x", "mean", "std", "valid_n")):
+        return np.nan
+    return _reference_mean_scatter_error(columns["x"], columns["mean"], columns["std"], columns["valid_n"])
+
+
+def _rows_mark_reference_average(rows):
+    for row in rows[:20]:
+        if len(row) < 2:
+            continue
+        key = _header_name(row[0])
+        value = _header_name(row[1])
+        if key == "reference average" and value in ("true", "yes", "1"):
+            return True
+    return False
 
 
 def _find_pkfit_main_position(rows, x, y, header_index, header):
@@ -247,11 +358,69 @@ def _read_pkfit_peak_fit_spectrum(filepath):
     return x, y
 
 
+def _read_pkfit_iad_reference(filepath):
+    rows = _read_pkfit_rows(filepath)
+    x, y, _header_index, _header = _extract_pkfit_xy(rows)
+    is_average = _rows_mark_reference_average(rows)
+    fit_error = _extract_pkfit_fit_error(rows)
+    input_fit_errors = _extract_pkfit_input_reference_fit_errors(rows)
+    scatter_columns = _extract_pkfit_table_columns(
+        rows,
+        {
+            "x": ("x", "energy"),
+            "mean": ("peak fit", "y", "raw y", "intensity"),
+            "std": ("std",),
+            "valid_n": ("valid n",),
+        },
+    )
+
+    average_fit_error = _extract_pkfit_scalar(
+        rows,
+        ("average reference fit error", "avg reference fit error"),
+    )
+    if not np.isfinite(average_fit_error):
+        average_fit_error = _average_reference_fit_error(input_fit_errors)
+    if not is_average and not np.isfinite(average_fit_error):
+        average_fit_error = fit_error
+
+    scatter_error = _extract_pkfit_scalar(
+        rows,
+        ("reference mean scatter error", "reference scatter error"),
+    )
+    if not np.isfinite(scatter_error):
+        scatter_error = _extract_pkfit_average_scatter_error(rows)
+
+    total_error = _extract_pkfit_scalar(
+        rows,
+        ("total average reference error", "total reference error"),
+    )
+    if not np.isfinite(total_error):
+        if is_average:
+            total_error = _quadrature(average_fit_error, scatter_error)
+        else:
+            total_error = fit_error
+
+    metadata = {
+        "is_average": is_average,
+        "fit_error": float(fit_error),
+        "input_fit_errors": input_fit_errors,
+        "average_reference_fit_error": float(average_fit_error),
+        "reference_mean_scatter_error": float(scatter_error),
+        "total_reference_error": float(total_error),
+        "reference_scatter_x": scatter_columns.get("x", np.array([], dtype=float)),
+        "reference_scatter_mean": scatter_columns.get("mean", np.array([], dtype=float)),
+        "reference_scatter_std": scatter_columns.get("std", np.array([], dtype=float)),
+        "reference_scatter_valid_n": scatter_columns.get("valid_n", np.array([], dtype=float)),
+    }
+    return x, y, metadata
+
+
 def _read_pkfit_reference_profile(filepath):
     rows = _read_pkfit_rows(filepath)
     x, y, header_index, header = _extract_pkfit_xy(rows)
     main_position = _find_pkfit_main_position(rows, x, y, header_index, header)
-    return x, y, main_position
+    fit_error = _extract_pkfit_fit_error(rows)
+    return x, y, main_position, fit_error
 
 
 def _is_pkfit_reference_average(filepath):
@@ -259,14 +428,7 @@ def _is_pkfit_reference_average(filepath):
         rows = _read_pkfit_rows(filepath)
     except Exception:
         return False
-    for row in rows[:20]:
-        if len(row) < 2:
-            continue
-        key = _header_name(row[0])
-        value = _header_name(row[1])
-        if key == "reference average" and value in ("true", "yes", "1"):
-            return True
-    return False
+    return _rows_mark_reference_average(rows)
 
 
 def _preferred_spectrum_y_column(headers):
@@ -391,6 +553,9 @@ def _fit_metadata(fit_result):
         "physical_fit": bool(getattr(fit_result, "physical_fit", False)),
         "tail_baseline_enabled": bool(getattr(fit_result, "tail_baseline_enabled", False)),
         "tail_fraction": float(getattr(fit_result, "tail_fraction", 0.10)),
+        "relative_fit_error": float(getattr(fit_result, "relative_fit_error", np.nan)),
+        "fit_residual_area": float(getattr(fit_result, "fit_residual_area", np.nan)),
+        "fit_total_intensity": float(getattr(fit_result, "fit_total_intensity", np.nan)),
     }
 
 
@@ -400,6 +565,8 @@ def _write_fit_group(parent, name, fit_result):
     _write_array(group, "raw_y", getattr(fit_result, "raw_y", None))
     _write_array(group, "fit_y", getattr(fit_result, "fit_y", None))
     _write_array(group, "tail_baseline", getattr(fit_result, "tail_baseline", None))
+    _write_array(group, "fit_residual", getattr(fit_result, "fit_residual", None))
+    _write_array(group, "normalized_fit_residual", getattr(fit_result, "normalized_fit_residual", None))
     _write_array(group, "best_fit", getattr(fit_result, "best_fit", None))
     _write_array(group, "normalized_fit", getattr(fit_result, "normalized_fit", None))
     _write_array(group, "baseline", getattr(fit_result, "baseline", None))
@@ -531,6 +698,77 @@ def _integrated_absolute_difference(x_values, first_y, second_y):
     if np.count_nonzero(finite) < 2:
         return float(np.nansum(diff[finite]))
     return _trapezoid_area(x_values[finite], diff[finite])
+
+
+def _quadrature(*values):
+    finite_values = []
+    for value in values:
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(value):
+            finite_values.append(value)
+    if not finite_values:
+        return np.nan
+    finite_values = np.asarray(finite_values, dtype=float)
+    return float(np.sqrt(np.sum(finite_values * finite_values)))
+
+
+def _average_reference_fit_error(fit_errors):
+    fit_errors = np.asarray(fit_errors, dtype=float)
+    fit_errors = fit_errors[np.isfinite(fit_errors)]
+    if fit_errors.size == 0:
+        return np.nan
+    return float(np.sqrt(np.sum(fit_errors * fit_errors)) / fit_errors.size)
+
+
+def _reference_mean_scatter_error(x_values, mean_y, std_y, valid_counts):
+    x_values = np.asarray(x_values, dtype=float)
+    mean_y = np.asarray(mean_y, dtype=float)
+    std_y = np.asarray(std_y, dtype=float)
+    valid_counts = np.asarray(valid_counts, dtype=float)
+    sem = np.full_like(std_y, np.nan, dtype=float)
+    valid_n = np.isfinite(valid_counts) & (valid_counts > 0)
+    sem[valid_n] = std_y[valid_n] / np.sqrt(valid_counts[valid_n])
+    valid = np.isfinite(x_values) & np.isfinite(mean_y) & np.isfinite(sem)
+    if np.count_nonzero(valid) < 2:
+        return np.nan
+    denominator = _trapezoid_area(x_values[valid], np.abs(mean_y[valid]))
+    numerator = _trapezoid_area(x_values[valid], np.abs(sem[valid]))
+    if not np.isfinite(denominator) or denominator <= np.finfo(float).eps:
+        return np.nan
+    return float(numerator / denominator)
+
+
+def _reference_fractional_scatter_error(reference, fraction):
+    try:
+        fraction = float(fraction)
+    except (TypeError, ValueError):
+        return np.nan
+    if not np.isfinite(fraction) or fraction <= 0:
+        return np.nan
+    fraction = min(fraction, 1.0)
+    x_values = np.asarray(reference.get("reference_scatter_x", []), dtype=float)
+    mean_y = np.asarray(reference.get("reference_scatter_mean", []), dtype=float)
+    std_y = np.asarray(reference.get("reference_scatter_std", []), dtype=float)
+    valid_counts = np.asarray(reference.get("reference_scatter_valid_n", []), dtype=float)
+    if not (x_values.size and x_values.shape == mean_y.shape == std_y.shape == valid_counts.shape):
+        return np.nan
+    sem = np.full_like(std_y, np.nan, dtype=float)
+    valid_n = np.isfinite(valid_counts) & (valid_counts > 0)
+    sem[valid_n] = std_y[valid_n] / np.sqrt(valid_counts[valid_n])
+    valid = np.isfinite(x_values) & np.isfinite(mean_y) & np.isfinite(sem)
+    valid_indices = np.flatnonzero(valid)
+    if valid_indices.size < 2:
+        return np.nan
+    satellite_count = max(2, int(round(valid_indices.size * fraction)))
+    satellite_indices = valid_indices[:min(satellite_count, valid_indices.size)]
+    denominator = _trapezoid_area(x_values[valid], np.abs(mean_y[valid]))
+    numerator = _trapezoid_area(x_values[satellite_indices], np.abs(sem[satellite_indices]))
+    if not np.isfinite(denominator) or denominator <= np.finfo(float).eps:
+        return np.nan
+    return float(numerator / denominator)
 
 
 def _tail_baseline_level(y_values, edge_fraction=0.08):
@@ -683,6 +921,28 @@ def _format_fit_value(value):
     return f"{value:.6g}"
 
 
+def _format_optional_float(value, precision=10):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if not np.isfinite(value):
+        return ""
+    return f"{value:.{precision}g}"
+
+
+def _format_fit_error(value):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if not np.isfinite(value):
+        return ""
+    if value < 0.001:
+        return f"{value:.3e}"
+    return f"{100.0 * value:.2f}%"
+
+
 def _component_scale(fit_result):
     best_fit = np.asarray(fit_result.best_fit, dtype=float)
     profile = np.asarray(fit_result.normalized_fit, dtype=float)
@@ -699,6 +959,19 @@ def _component_scale(fit_result):
             return None
         return total
     return raw_total / profile_total
+
+
+def _finite_min_max(arrays):
+    finite_parts = []
+    for values in arrays:
+        array = np.asarray(values, dtype=float)
+        finite = array[np.isfinite(array)]
+        if finite.size:
+            finite_parts.append(finite)
+    if not finite_parts:
+        return 0.0, 1.0
+    combined = np.concatenate(finite_parts)
+    return float(np.nanmin(combined)), float(np.nanmax(combined))
 
 
 def _peak_fit_parameter_rows(fit_result):
@@ -791,7 +1064,11 @@ class ButtonPanelWidget(QtWidgets.QWidget):
         self._button_row = QtWidgets.QHBoxLayout()
         self._button_row.setContentsMargins(0, 0, 0, 0)
         self._button_row.setSpacing(0)
-        self._button_row.addStretch(1)
+        if role == "sub":
+            self._button_row.addStretch(1)
+            self._button_row.addStretch(1)
+        else:
+            self._button_row.addStretch(1)
         layout.addLayout(self._button_row)
         divider = QtWidgets.QFrame()
         divider.setFrameShape(QtWidgets.QFrame.Shape.HLine)
@@ -843,9 +1120,12 @@ class ButtonPanelWidget(QtWidgets.QWidget):
         if self._role == "main":
             button.setMinimumWidth(142)
         else:
-            button.setFixedWidth(96)
+            button.setMinimumWidth(132)
+            if text in ("Spectrum Plotting", "Spectrum Reference"):
+                button.setMinimumWidth(172)
         button.clicked.connect(lambda _checked=False, panel_index=index: self.setCurrentIndex(panel_index))
-        self._button_row.insertWidget(len(self._buttons), button)
+        insert_index = max(self._button_row.count() - 1, 0) if self._role == "sub" else len(self._buttons)
+        self._button_row.insertWidget(insert_index, button)
         self._buttons.append(button)
         if index == 0:
             self.setCurrentIndex(0)
@@ -1243,19 +1523,12 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         panels.addPanel(self._build_spectrum_controls_tab(), "Spectrum Analysis")
         panels.addPanel(self._build_iad_controls_tab(), "IAD Calculation")
         panels.addPanel(self._build_calibration_controls_tab(), "Calibration")
-        self.global_save_project_button = QtWidgets.QPushButton("Save")
+        self.global_save_project_button = QtWidgets.QPushButton("Save Project")
         self.global_save_project_button.setAutoDefault(False)
-        self.global_save_project_button.setFixedWidth(82)
+        self.global_save_project_button.setFixedWidth(116)
         self.global_save_project_button.setToolTip("Save the full IXE project")
         self.global_save_project_button.clicked.connect(self.save_project)
-        self.global_save_project_button.setStyleSheet(
-            "QPushButton {"
-            "background: #dff1e7; color: #075c3d; border: 1px solid #6bbf8e;"
-            "border-radius: 0px; padding: 5px 14px; font-weight: 700;"
-            "}"
-            "QPushButton:hover { background: #d3eadf; }"
-            "QPushButton:pressed { background: #c1decf; }"
-        )
+        self._style_active_button(self.global_save_project_button)
         panels.addHeaderWidget(self.global_save_project_button, spacing=12)
         return panels
 
@@ -1269,8 +1542,8 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         file_row.setContentsMargins(0, 0, 0, 0)
         file_row.setSpacing(8)
 
-        self.import_button = QtWidgets.QPushButton("Import TIFF")
-        self.import_stack_button = QtWidgets.QPushButton("Import TIFF Stack")
+        self.import_button = QtWidgets.QPushButton("Import Image")
+        self.import_stack_button = QtWidgets.QPushButton("Import Stack Image")
         self.import_button.setFixedWidth(148)
         self.import_stack_button.setFixedWidth(176)
         self.import_button.clicked.connect(self.import_tiff)
@@ -1309,7 +1582,6 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         self.cmap_combo.addItems(["viridis", "plasma", "inferno", "magma", "cividis", "gray", "Greys", "turbo"])
         self.cmap_combo.setFixedWidth(104)
         self.cmap_combo.currentTextChanged.connect(self.update_cmap)
-        self.tilt_label = QtWidgets.QLabel("Auto Tilt: --")
         self.manual_tilt_spin = QtWidgets.QDoubleSpinBox()
         self.manual_tilt_spin.setRange(-20.0, 20.0)
         self.manual_tilt_spin.setDecimals(2)
@@ -1318,42 +1590,21 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         self.manual_tilt_spin.setFixedWidth(102)
         self.manual_tilt_spin.setValue(0.0)
 
-        self.gap_overlay_check = QtWidgets.QCheckBox("Show gap overlay")
-        self.gap_overlay_check.stateChanged.connect(self.refresh_image)
-
-        settings_row = QtWidgets.QHBoxLayout()
-        settings_row.setContentsMargins(0, 0, 0, 0)
-        settings_row.setSpacing(4)
-        settings_row.addWidget(QtWidgets.QLabel("vmin:"))
-        settings_row.addWidget(self.vmin_spin)
-        settings_row.addSpacing(12)
-        settings_row.addWidget(QtWidgets.QLabel("vmax:"))
-        settings_row.addWidget(self.vmax_spin)
-        settings_row.addSpacing(12)
-        settings_row.addWidget(QtWidgets.QLabel("Cmap:"))
-        settings_row.addWidget(self.cmap_combo)
-        settings_row.addSpacing(16)
-        settings_row.addWidget(self.tilt_label)
-        settings_row.addSpacing(16)
-        settings_row.addWidget(self.gap_overlay_check)
-        settings_row.addStretch(1)
-        layout.addLayout(settings_row)
-
-        self.process_button = QtWidgets.QPushButton("Process>")
+        self.process_button = QtWidgets.QPushButton("Tilt Correction")
         self.process_button.setFixedWidth(132)
         self.process_button.clicked.connect(self.process_image)
         self._style_active_button(self.process_button)
-        self.apply_tilt_button = QtWidgets.QPushButton("Apply Tilt")
+        self.apply_tilt_button = QtWidgets.QPushButton("Manual Tilt")
         self.apply_tilt_button.setFixedWidth(104)
         self.apply_tilt_button.clicked.connect(self.apply_manual_tilt)
 
         gap_button = QtWidgets.QPushButton("Gap Mask")
         gap_button.clicked.connect(self.show_gap_mask)
-        save_image_button = QtWidgets.QPushButton("Save CCD")
+        save_image_button = QtWidgets.QPushButton("Export Image")
         save_image_button.clicked.connect(self.save_image_png)
         open_project_button = QtWidgets.QPushButton("Open Project")
         open_project_button.clicked.connect(self.open_project)
-        save_project_button = QtWidgets.QPushButton("Save Project")
+        save_project_button = QtWidgets.QPushButton("Export Project")
         save_project_button.clicked.connect(self.save_project)
         for button in (gap_button, save_image_button, open_project_button, save_project_button):
             button.setFixedWidth(132)
@@ -1366,11 +1617,17 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         action_row.addWidget(self.manual_tilt_spin)
         action_row.addWidget(self.apply_tilt_button)
         action_row.addWidget(gap_button)
-        action_row.addWidget(save_image_button)
-        action_row.addWidget(open_project_button)
-        action_row.addWidget(save_project_button)
         action_row.addStretch(1)
         layout.addLayout(action_row)
+
+        project_row = QtWidgets.QHBoxLayout()
+        project_row.setContentsMargins(0, 0, 0, 0)
+        project_row.setSpacing(8)
+        project_row.addWidget(open_project_button)
+        project_row.addWidget(save_project_button)
+        project_row.addWidget(save_image_button)
+        project_row.addStretch(1)
+        layout.addLayout(project_row)
         layout.addStretch(1)
         return panel
 
@@ -1381,9 +1638,9 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         layout.setSpacing(1)
 
         self.spectrum_control_tabs = ButtonPanelWidget(role="sub")
-        self.spectrum_control_tabs.addPanel(self._build_spectrum_plotting_tab(), "Plotting")
-        self.spectrum_control_tabs.addPanel(self._build_spectrum_fitting_tab(), "Fitting")
-        self.spectrum_control_tabs.addPanel(self._build_spectrum_reference_tab(), "Reference")
+        self.spectrum_control_tabs.addPanel(self._build_spectrum_plotting_tab(), "Spectrum Plotting")
+        self.spectrum_control_tabs.addPanel(self._build_spectrum_fitting_tab(), "Peak Fitting")
+        self.spectrum_control_tabs.addPanel(self._build_spectrum_reference_tab(), "Spectrum Reference")
         layout.addWidget(self.spectrum_control_tabs)
         return panel
 
@@ -1436,11 +1693,11 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         self.bg_row_bar = QtDualRangeBar(height=46, second_enabled=True)
         self.bg_row_bar.rangesChanged.connect(self._on_bg_row_bar_changed)
 
-        self.roi_add_button = QtWidgets.QPushButton("+")
-        self.roi_add_button.setFixedWidth(30)
+        self.roi_add_button = QtWidgets.QPushButton("Add a row")
+        self.roi_add_button.setFixedWidth(92)
         self.roi_add_button.clicked.connect(self.add_roi_row_range)
-        self.roi_remove_button = QtWidgets.QPushButton("-")
-        self.roi_remove_button.setFixedWidth(30)
+        self.roi_remove_button = QtWidgets.QPushButton("Subtract a row")
+        self.roi_remove_button.setFixedWidth(116)
         self.roi_remove_button.clicked.connect(self.remove_roi_row_range)
 
         roi_actions = QtWidgets.QHBoxLayout()
@@ -1461,17 +1718,18 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         self.plot_button.clicked.connect(self.plot_spectrum)
         self._style_active_button(self.plot_button)
 
-        self.gap_check = QtWidgets.QPushButton("Gap Mask (ON)")
-        self.gap_check.setFixedWidth(162)
-        self.gap_check.setCheckable(True)
-        self.gap_check.setChecked(True)
+        self.gap_enabled_check = QtWidgets.QCheckBox()
+        self.gap_enabled_check.setChecked(True)
+        self.gap_enabled_check.stateChanged.connect(self.toggle_gap_correction)
+        self.gap_check = QtWidgets.QPushButton("Gap Mask")
+        self.gap_check.setFixedWidth(132)
         self.gap_check.clicked.connect(self.toggle_gap_correction)
-        self._set_toggle_style(self.gap_check, True, "Gap Mask (ON)", "Gap Mask (OFF)")
 
         col_actions = QtWidgets.QHBoxLayout()
         col_actions.setContentsMargins(0, 0, 0, 0)
         col_actions.setSpacing(6)
         col_actions.addWidget(self.plot_button)
+        col_actions.addWidget(self.gap_enabled_check)
         col_actions.addWidget(self.gap_check)
 
         col_label = QtWidgets.QLabel("ROI Columns:")
@@ -1484,16 +1742,18 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         self.auto_bg_button = QtWidgets.QPushButton("Auto BG")
         self.auto_bg_button.setFixedWidth(110)
         self.auto_bg_button.clicked.connect(self.auto_background)
+        self.bg_enabled_check = QtWidgets.QCheckBox()
+        self.bg_enabled_check.setChecked(False)
+        self.bg_enabled_check.stateChanged.connect(self.toggle_background_removal)
         self.bg_check = QtWidgets.QPushButton("BG Remove")
-        self.bg_check.setFixedWidth(158)
-        self.bg_check.setCheckable(True)
+        self.bg_check.setFixedWidth(132)
         self.bg_check.clicked.connect(self.toggle_background_removal)
-        self._set_toggle_style(self.bg_check, False, "BG Remove (ON)", "BG Remove (OFF)")
 
         bg_actions = QtWidgets.QHBoxLayout()
         bg_actions.setContentsMargins(0, 0, 0, 0)
         bg_actions.setSpacing(6)
         bg_actions.addWidget(self.auto_bg_button)
+        bg_actions.addWidget(self.bg_enabled_check)
         bg_actions.addWidget(self.bg_check)
 
         bg_label = QtWidgets.QLabel("BG Rows:")
@@ -1505,7 +1765,7 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         layout.addLayout(selector_grid)
 
         self.line_color = QtGui.QColor("#202020")
-        color_button = QtWidgets.QPushButton("Pick Color")
+        color_button = QtWidgets.QPushButton("Pick color")
         color_button.setFixedWidth(104)
         color_button.clicked.connect(self.pick_line_color)
         self.line_style_combo = QtWidgets.QComboBox()
@@ -1519,27 +1779,31 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         self.line_width_spin.setFixedWidth(74)
         self.line_width_spin.setValue(1.6)
         self.line_width_spin.valueChanged.connect(self.update_plot_style)
-        save_spectrum_button = QtWidgets.QPushButton("Save Spectrum")
+        save_spectrum_button = QtWidgets.QPushButton("Export Spectrum")
         save_spectrum_button.setFixedWidth(132)
         save_spectrum_button.clicked.connect(self.save_spectrum_data)
-        self.save_png_button = QtWidgets.QPushButton("Save Image")
-        self.save_png_button.setFixedWidth(116)
-        self.save_png_button.clicked.connect(self.save_spectrum_png)
-        self.save_svg_button = QtWidgets.QPushButton("Save SVG")
+        self.save_svg_button = QtWidgets.QPushButton("Export Image")
         self.save_svg_button.setFixedWidth(116)
         self.save_svg_button.clicked.connect(self.save_spectrum_svg)
 
         line_row = QtWidgets.QHBoxLayout()
         line_row.setContentsMargins(0, 0, 0, 0)
         line_row.setSpacing(8)
+        line_row.addWidget(QtWidgets.QLabel("Line Properties"))
         line_row.addWidget(color_button)
         line_row.addWidget(QtWidgets.QLabel("Line Style:"))
         line_row.addWidget(self.line_style_combo)
         line_row.addWidget(QtWidgets.QLabel("Line Width:"))
         line_row.addWidget(self.line_width_spin)
-        line_row.addSpacing(12)
+        group_divider = QtWidgets.QFrame()
+        group_divider.setFrameShape(QtWidgets.QFrame.Shape.VLine)
+        group_divider.setFrameShadow(QtWidgets.QFrame.Shadow.Plain)
+        group_divider.setFixedWidth(1)
+        group_divider.setStyleSheet("background-color: #c9cfd6; border: 0;")
+        line_row.addSpacing(6)
+        line_row.addWidget(group_divider)
+        line_row.addSpacing(6)
         line_row.addWidget(save_spectrum_button)
-        line_row.addWidget(self.save_png_button)
         line_row.addWidget(self.save_svg_button)
         line_row.addStretch(1)
         layout.addLayout(line_row)
@@ -1581,6 +1845,15 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         self.peak_fit_start.setFixedWidth(80)
         self.peak_fit_end = QtWidgets.QLineEdit()
         self.peak_fit_end.setFixedWidth(80)
+
+        def fit_divider():
+            divider = QtWidgets.QFrame()
+            divider.setFrameShape(QtWidgets.QFrame.Shape.VLine)
+            divider.setFrameShadow(QtWidgets.QFrame.Shadow.Plain)
+            divider.setFixedWidth(1)
+            divider.setStyleSheet("background-color: #c9cfd6; border: 0;")
+            return divider
+
         controls.addSpacing(10)
         controls.addWidget(QtWidgets.QLabel("Peaks:"))
         controls.addWidget(self.peak_fit_count)
@@ -1593,14 +1866,31 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         peak_fit_button = QtWidgets.QPushButton("Peak Fit")
         peak_fit_button.setFixedWidth(96)
         peak_fit_button.clicked.connect(self.show_peak_fit_profile)
-        save_pkfit_button = QtWidgets.QPushButton("Save pkfit")
-        save_pkfit_button.setFixedWidth(104)
+        self._style_active_button(peak_fit_button)
+        save_pkfit_button = QtWidgets.QPushButton("Export PKfit")
+        save_pkfit_button.setFixedWidth(116)
         save_pkfit_button.clicked.connect(self.save_peak_fit_data)
-        save_params_button = QtWidgets.QPushButton("Save Params")
+        save_params_button = QtWidgets.QPushButton("Export Params")
         save_params_button.setFixedWidth(116)
         save_params_button.clicked.connect(self.save_peak_fit_parameters)
-        controls.addSpacing(12)
+        controls.addSpacing(8)
+        controls.addWidget(fit_divider())
+        controls.addSpacing(8)
         controls.addWidget(peak_fit_button)
+        controls.addSpacing(8)
+        controls.addWidget(fit_divider())
+        controls.addSpacing(8)
+        controls.addWidget(QtWidgets.QLabel("Fit Error:"))
+        self.peak_fit_error_entry = QtWidgets.QLineEdit()
+        self.peak_fit_error_entry.setReadOnly(True)
+        self.peak_fit_error_entry.setFixedWidth(88)
+        self.peak_fit_error_entry.setToolTip(
+            "integral(abs(ROI corrected - Peak fit)) / integral(abs(ROI corrected))"
+        )
+        controls.addWidget(self.peak_fit_error_entry)
+        controls.addSpacing(8)
+        controls.addWidget(fit_divider())
+        controls.addSpacing(8)
         controls.addWidget(save_pkfit_button)
         controls.addWidget(save_params_button)
         controls.addStretch(1)
@@ -1636,13 +1926,13 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         average_button = QtWidgets.QPushButton("Average")
         average_button.clicked.connect(self.average_reference_spectra)
         self._style_active_button(average_button)
-        save_button = QtWidgets.QPushButton("Save")
+        save_button = QtWidgets.QPushButton("Export Reference")
         save_button.clicked.connect(self.save_average_reference)
         for button, width in (
             (import_button, 96),
             (remove_button, 96),
             (average_button, 104),
-            (save_button, 88),
+            (save_button, 134),
         ):
             button.setFixedWidth(width)
             button_row.addWidget(button)
@@ -1653,8 +1943,8 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         button_row.addStretch(1)
         layout.addLayout(button_row)
 
-        self.reference_average_table = QtWidgets.QTableWidget(0, 4)
-        self.reference_average_table.setHorizontalHeaderLabels(["Use", "Run", "Kβ₁,₃ px", "Shift"])
+        self.reference_average_table = QtWidgets.QTableWidget(0, 5)
+        self.reference_average_table.setHorizontalHeaderLabels(["Use", "Run", "Kβ₁,₃ px", "Fit error", "Shift"])
         self.reference_average_table.verticalHeader().setVisible(False)
         self.reference_average_table.verticalHeader().setDefaultSectionSize(20)
         self.reference_average_table.verticalHeader().setMinimumSectionSize(18)
@@ -1667,6 +1957,7 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         layout.addWidget(self.reference_average_table, stretch=1)
         return panel
 
@@ -1679,21 +1970,54 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         button_row = QtWidgets.QHBoxLayout()
         button_row.setContentsMargins(0, 0, 0, 0)
         button_row.setSpacing(8)
-        iad_buttons = [
-            ("Import Ref.", 128, self.import_reference_spectrum),
-            ("Remove", 86, self.remove_iad_reference),
-            ("Color", 86, self.pick_iad_reference_color),
-            ("Integrated Diff.", 132, self.plot_integrated_diff),
-            ("Satellite Diff.", 132, self.calculate_satellite_iad),
-            ("Save IAD", 104, self.save_iad_results),
-        ]
-        for text, width, slot in iad_buttons:
+        for text, width, slot in (
+            ("Import Ref.", 116, self.import_reference_spectrum),
+            ("Remove", 76, self.remove_iad_reference),
+            ("Color", 76, self.pick_iad_reference_color),
+        ):
             button = QtWidgets.QPushButton(text)
             button.setFixedWidth(width)
             button.clicked.connect(slot)
             button_row.addWidget(button)
         button_row.addStretch(1)
         layout.addLayout(button_row)
+
+        action_row = QtWidgets.QHBoxLayout()
+        action_row.setContentsMargins(0, 0, 0, 0)
+        action_row.setSpacing(8)
+
+        def iad_divider():
+            divider = QtWidgets.QFrame()
+            divider.setFrameShape(QtWidgets.QFrame.Shape.VLine)
+            divider.setFrameShadow(QtWidgets.QFrame.Shadow.Plain)
+            divider.setFixedWidth(1)
+            divider.setStyleSheet("background-color: #c9cfd6; border: 0;")
+            return divider
+
+        for text, width, slot in (
+            ("IAD", 82, self.plot_integrated_diff),
+            ("IAD Error", 104, self.calculate_iad_error),
+        ):
+            button = QtWidgets.QPushButton(text)
+            button.setFixedWidth(width)
+            button.clicked.connect(slot)
+            action_row.addWidget(button)
+        action_row.addWidget(iad_divider())
+        for text, width, slot in (
+            ("Satellite IAD", 126, self.calculate_satellite_iad),
+            ("Satellite IAD error", 158, self.calculate_satellite_iad_error),
+        ):
+            button = QtWidgets.QPushButton(text)
+            button.setFixedWidth(width)
+            button.clicked.connect(slot)
+            action_row.addWidget(button)
+        action_row.addWidget(iad_divider())
+        export_iad_button = QtWidgets.QPushButton("Export IAD Values")
+        export_iad_button.setFixedWidth(152)
+        export_iad_button.clicked.connect(self.save_iad_results)
+        action_row.addWidget(export_iad_button)
+        action_row.addStretch(1)
+        layout.addLayout(action_row)
 
         self.cross_begin = QtWidgets.QLineEdit(str(self.parm['PK intersect']['i_l']))
         self.cross_begin.setFixedWidth(54)
@@ -1704,22 +2028,32 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         cross_row = QtWidgets.QHBoxLayout()
         cross_row.setContentsMargins(0, 0, 0, 0)
         cross_row.setSpacing(6)
-        cross_row.addWidget(QtWidgets.QLabel("Spectra Cross:"))
+        cross_row.addWidget(QtWidgets.QLabel("Spectra Crossing Range:"))
         cross_row.addWidget(self.cross_begin)
         cross_row.addWidget(QtWidgets.QLabel("-"))
         cross_row.addWidget(self.cross_end)
         cross_row.addSpacing(16)
-        cross_row.addWidget(QtWidgets.QLabel("Eye Ball Cross:"))
+        cross_row.addWidget(QtWidgets.QLabel("Manual crossing:"))
         cross_row.addWidget(self.eye_ball_cross)
         self.iad_baseline_check = QtWidgets.QCheckBox("Align baseline")
         self.iad_baseline_check.setChecked(True)
         cross_row.addSpacing(16)
         cross_row.addWidget(self.iad_baseline_check)
+        self.iad_mc_trials_spin = QtWidgets.QSpinBox()
+        self.iad_mc_trials_spin.setRange(20, 1000)
+        self.iad_mc_trials_spin.setSingleStep(50)
+        self.iad_mc_trials_spin.setValue(IAD_MC_DEFAULT_TRIALS)
+        self.iad_mc_trials_spin.setFixedWidth(78)
+        self.iad_mc_trials_spin.setToolTip("Monte Carlo re-fit trials used by IAD Error and Satellite IAD error.")
+        self.iad_mc_trials_spin.valueChanged.connect(self._clear_iad_mc_cache)
+        cross_row.addSpacing(16)
+        cross_row.addWidget(QtWidgets.QLabel("Monte Carlo trials:"))
+        cross_row.addWidget(self.iad_mc_trials_spin)
         cross_row.addStretch(1)
         layout.addLayout(cross_row)
 
-        self.iad_line_table = QtWidgets.QTableWidget(0, 4)
-        self.iad_line_table.setHorizontalHeaderLabels(["Use", "Reference", "IAD", "Satellite IAD"])
+        self.iad_line_table = QtWidgets.QTableWidget(0, 6)
+        self.iad_line_table.setHorizontalHeaderLabels(["Use", "Reference", "IAD", "IAD error", "Satellite IAD", "Satellite IAD error"])
         self.iad_line_table.verticalHeader().setVisible(False)
         self.iad_line_table.verticalHeader().setDefaultSectionSize(20)
         self.iad_line_table.verticalHeader().setMinimumSectionSize(18)
@@ -1731,9 +2065,13 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Fixed)
         header.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(5, QtWidgets.QHeaderView.ResizeMode.Fixed)
         self.iad_line_table.setColumnWidth(0, 44)
-        self.iad_line_table.setColumnWidth(2, 94)
-        self.iad_line_table.setColumnWidth(3, 118)
+        self.iad_line_table.setColumnWidth(2, 84)
+        self.iad_line_table.setColumnWidth(3, 94)
+        self.iad_line_table.setColumnWidth(4, 108)
+        self.iad_line_table.setColumnWidth(5, 92)
         layout.addWidget(self.iad_line_table, stretch=1)
         return panel
 
@@ -1747,10 +2085,10 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
             ("Import Cal.", 96, self.import_calibration_spectrum),
             ("Fit Cal.", 76, self.fit_calibration_spectrum),
             ("Calc Map", 88, self.calculate_energy_calibration),
-            ("Apply Cal.", 88, self.apply_energy_calibration),
             ("Show Cal. Fit", 106, self.show_calibration_fit),
             ("Compare Cal.", 108, self.compare_calibration_overlay),
-            ("Save Cal.", 82, self.save_calibrated_spectrum_data),
+            ("Apply Cal.", 88, self.apply_energy_calibration),
+            ("Export Cal.", 88, self.save_calibrated_spectrum_data),
         ]
         button_row = QtWidgets.QHBoxLayout()
         button_row.setContentsMargins(0, 0, 0, 0)
@@ -1760,7 +2098,7 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
             button.setFixedWidth(width)
             button.clicked.connect(slot)
             button_row.addWidget(button)
-            if index == 2:
+            if index in (2, 4):
                 group_divider = QtWidgets.QFrame()
                 group_divider.setFrameShape(QtWidgets.QFrame.Shape.VLine)
                 group_divider.setFrameShadow(QtWidgets.QFrame.Shadow.Plain)
@@ -1936,9 +2274,11 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         use_item.setCheckState(QtCore.Qt.CheckState.Checked)
         use_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.reference_average_table.setItem(row, 0, use_item)
+        fit_error = reference.get('fit_error', np.nan)
         values = [
             reference.get('label', f"Ref {row + 1}"),
             f"{float(reference.get('main_position', np.nan)):.6g}",
+            _format_fit_error(fit_error) or "--",
             "",
         ]
         for column, value in enumerate(values, start=1):
@@ -1987,7 +2327,7 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         imported = 0
         for path in paths:
             try:
-                x_data, y_data, main_position = _read_pkfit_reference_profile(path)
+                x_data, y_data, main_position, fit_error = _read_pkfit_reference_profile(path)
             except Exception as exc:
                 failures.append(f"{os.path.basename(path)}: {exc}")
                 continue
@@ -1998,6 +2338,7 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
                 "y": np.asarray(y_data, dtype=float),
                 "y_norm": y_norm,
                 "main_position": float(main_position),
+                "fit_error": float(fit_error),
                 "label": _run_label_from_path(path),
                 "color": palette[len(self.reference_average_spectra) % len(palette)],
                 "last_shift": np.nan,
@@ -2111,6 +2452,7 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
                     "label": reference.get("label", f"Ref {index + 1}"),
                     "path": reference.get("path", ""),
                     "main_position": float(reference.get("main_position", np.nan)),
+                    "fit_error": float(reference.get("fit_error", np.nan)),
                     "shift": float(shift),
                 }
             )
@@ -2140,6 +2482,10 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         except Exception as exc:
             QtWidgets.QMessageBox.warning(self, "Average Reference", str(exc))
             return
+        input_fit_errors = [item.get("fit_error", np.nan) for item in metadata]
+        average_fit_error = _average_reference_fit_error(input_fit_errors)
+        scatter_error = _reference_mean_scatter_error(common_x, avg, std, valid_counts)
+        total_reference_error = _quadrature(average_fit_error, scatter_error)
         self.last_reference_average = {
             "x": common_x,
             "stack": stack,
@@ -2151,11 +2497,14 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
             "area_normalized": True,
             "average_baseline": avg_baseline,
             "average_area_before_normalization": avg_area,
+            "average_reference_fit_error": average_fit_error,
+            "reference_mean_scatter_error": scatter_error,
+            "total_reference_error": total_reference_error,
             "references": metadata,
         }
         for reference_index, reference in enumerate(self.reference_average_spectra):
             shift = reference.get('last_shift', np.nan)
-            self._set_average_reference_table_value(reference_index, 3, "" if not np.isfinite(shift) else f"{shift:.6g}")
+            self._set_average_reference_table_value(reference_index, 4, "" if not np.isfinite(shift) else f"{shift:.6g}")
         self._draw_reference_average_result()
         valid_pixels = int(np.count_nonzero(valid_counts > 0))
         self.reference_average_summary.setText(
@@ -2222,7 +2571,7 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
             return
         path, _selected = QtWidgets.QFileDialog.getSaveFileName(
             self,
-            "Save averaged reference pkfit",
+            "Export averaged reference pkfit",
             self._default_save_path("Average_reference_pkfit.txt"),
             "Text data (*.txt);;CSV data (*.csv);;All files (*.*)",
         )
@@ -2242,14 +2591,18 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
             writer.writerow(["Target Kβ1,3 position", result.get("target_main_position", np.nan)])
             writer.writerow(["Average baseline before normalization", result.get("average_baseline", np.nan)])
             writer.writerow(["Average area before normalization", result.get("average_area_before_normalization", np.nan)])
+            writer.writerow(["Average reference fit error", result.get("average_reference_fit_error", np.nan)])
+            writer.writerow(["Reference mean scatter error", result.get("reference_mean_scatter_error", np.nan)])
+            writer.writerow(["Total average reference error", result.get("total_reference_error", np.nan)])
             writer.writerow(["Input references"])
-            writer.writerow(["Use", "Run", "Kβ1,3 position", "Shift", "Reference file"])
+            writer.writerow(["Use", "Run", "Kβ1,3 position", "Fit error", "Shift", "Reference file"])
             for reference in result.get('references', []):
                 writer.writerow(
                     [
                         True,
                         reference.get("label", ""),
                         reference.get("main_position", ""),
+                        reference.get("fit_error", ""),
                         reference.get("shift", ""),
                         reference.get("path", ""),
                     ]
@@ -2270,7 +2623,7 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
                         int(valid_counts[index]),
                     ]
                 )
-        self.statusBar().showMessage(f"Saved averaged reference pkfit: {path}")
+        self.statusBar().showMessage(f"Exported averaged reference pkfit: {path}")
 
     def _insert_iad_reference_row(self, reference):
         if not hasattr(self, 'iad_line_table'):
@@ -2287,7 +2640,7 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         use_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.iad_line_table.setItem(row, 0, use_item)
 
-        values = [reference['label'], "", ""]
+        values = [reference['label'], "", "", "", ""]
         for column, value in enumerate(values, start=1):
             item = QtWidgets.QTableWidgetItem(value)
             item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
@@ -2376,14 +2729,223 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         order = np.argsort(x_data)
         return x_data[order], y_data[order]
 
+    def _current_peak_fit_error(self):
+        if not hasattr(self, 'last_peak_fit_profile'):
+            return np.nan
+        value = getattr(self.last_peak_fit_profile, 'relative_fit_error', np.nan)
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return np.nan
+        return value if np.isfinite(value) else np.nan
+
+    def _iad_mc_trial_count(self):
+        if hasattr(self, 'iad_mc_trials_spin'):
+            return int(self.iad_mc_trials_spin.value())
+        return IAD_MC_DEFAULT_TRIALS
+
+    def _clear_iad_mc_cache(self, *_args):
+        if hasattr(self, 'last_iad_mc_sample'):
+            del self.last_iad_mc_sample
+
+    def _peak_fit_config_from_result(self, fit_result):
+        try:
+            return PeakFitConfig(
+                n_peaks=max(1, len(getattr(fit_result, 'centers', []) or [])),
+                peak_shape=getattr(fit_result, 'peak_shape', 'pseudo_voigt'),
+                physical_fit=bool(getattr(fit_result, 'physical_fit', False)),
+                tail_baseline=bool(getattr(fit_result, 'tail_baseline_enabled', False)),
+                tail_fraction=float(getattr(fit_result, 'tail_fraction', 0.10)),
+            )
+        except PeakFitError:
+            return None
+
+    def _monte_carlo_trial_fits(self):
+        if not hasattr(self, 'last_peak_fit_profile'):
+            return [], {"trials": 0, "success": 0, "failures": 0}
+
+        trial_count = self._iad_mc_trial_count()
+        fit_result = self.last_peak_fit_profile
+        cached = getattr(self, 'last_iad_mc_sample', None)
+        if (
+            cached
+            and cached.get('source_id') == id(fit_result)
+            and cached.get('trials') == trial_count
+        ):
+            return cached.get('fits', []), {
+                "trials": cached.get('trials', 0),
+                "success": cached.get('success', 0),
+                "failures": cached.get('failures', 0),
+            }
+
+        config = self._peak_fit_config_from_result(fit_result)
+        if config is None:
+            return [], {"trials": trial_count, "success": 0, "failures": trial_count}
+
+        x_data = np.asarray(fit_result.x, dtype=float)
+        fitted_y = np.asarray(fit_result.normalized_fit, dtype=float)
+        corrected_y = np.asarray(getattr(fit_result, 'fit_y', np.full_like(fitted_y, np.nan)), dtype=float)
+        tail_baseline = np.asarray(getattr(fit_result, 'tail_baseline', np.zeros_like(fitted_y)), dtype=float)
+        residual = corrected_y - fitted_y
+        finite_residual = residual[np.isfinite(residual)]
+        if finite_residual.size < 8:
+            return [], {"trials": trial_count, "success": 0, "failures": trial_count}
+        finite_residual = finite_residual - float(np.nanmean(finite_residual))
+
+        rng = np.random.default_rng(IAD_MC_SEED)
+        fits = []
+        failures = 0
+        for _trial_index in range(trial_count):
+            sampled_residual = rng.choice(finite_residual, size=x_data.size, replace=True)
+            trial_raw_y = fitted_y + tail_baseline + sampled_residual
+            try:
+                trial_fit = fit_spectrum(x_data, trial_raw_y, config)
+            except PeakFitError:
+                failures += 1
+                continue
+            trial_x = np.asarray(trial_fit.x, dtype=float)
+            trial_y = np.asarray(trial_fit.normalized_fit, dtype=float)
+            finite = np.isfinite(trial_x) & np.isfinite(trial_y)
+            if np.count_nonzero(finite) < 2:
+                failures += 1
+                continue
+            order = np.argsort(trial_x[finite])
+            fits.append((trial_x[finite][order], trial_y[finite][order]))
+
+        self.last_iad_mc_sample = {
+            "source_id": id(fit_result),
+            "trials": trial_count,
+            "success": len(fits),
+            "failures": failures,
+            "fits": fits,
+        }
+        return fits, {"trials": trial_count, "success": len(fits), "failures": failures}
+
+    def _reference_error_terms(self, reference):
+        if reference.get('is_average'):
+            fit_error = reference.get('average_reference_fit_error', np.nan)
+            scatter_error = reference.get('reference_mean_scatter_error', np.nan)
+            total_error = reference.get('total_reference_error', np.nan)
+            try:
+                total_error = float(total_error)
+            except (TypeError, ValueError):
+                total_error = np.nan
+            if not np.isfinite(total_error):
+                total_error = _quadrature(fit_error, scatter_error)
+        else:
+            fit_error = reference.get('fit_error', np.nan)
+            scatter_error = np.nan
+            total_error = fit_error
+        return fit_error, scatter_error, total_error
+
+    def _iad_uncertainty(self, reference):
+        trial_fits, mc_meta = self._monte_carlo_trial_fits()
+        iad_values = []
+        for trial_x, trial_y in trial_fits:
+            aligned = self._iad_arrays_from_fit(trial_x, trial_y, reference, warn=False)
+            if aligned is None:
+                continue
+            x_data, roi_y, ref_y = aligned
+            iad_values.append(_integrated_absolute_difference(x_data, roi_y, ref_y))
+        iad_values = np.asarray(iad_values, dtype=float)
+        iad_values = iad_values[np.isfinite(iad_values)]
+        trial_count = int(mc_meta.get("trials", self._iad_mc_trial_count()))
+        min_success = min(IAD_MC_MIN_SUCCESS, max(8, trial_count // 5))
+        if iad_values.size >= min_success:
+            sample_mc_error = float(np.nanstd(iad_values, ddof=1))
+            mc_mean = float(np.nanmean(iad_values))
+            mc_median = float(np.nanmedian(iad_values))
+        else:
+            sample_mc_error = np.nan
+            mc_mean = np.nan
+            mc_median = np.nan
+
+        ref_fit_score, ref_scatter_error, ref_total_score = self._reference_error_terms(reference)
+        total_error = _quadrature(sample_mc_error, ref_scatter_error)
+        return {
+            "iad_error": total_error,
+            "sample_mc_error": sample_mc_error,
+            "sample_residual_score": self._current_peak_fit_error(),
+            "reference_fit_score": ref_fit_score,
+            "reference_scatter_error": ref_scatter_error,
+            "reference_total_score": ref_total_score,
+            "mc_trials": trial_count,
+            "mc_success": int(iad_values.size),
+            "mc_failures": int(mc_meta.get("failures", 0)),
+            "mc_mean": mc_mean,
+            "mc_median": mc_median,
+        }
+
+    def _satellite_iad_uncertainty(self, reference):
+        trial_fits, mc_meta = self._monte_carlo_trial_fits()
+        satellite_values = []
+        transition_fractions = []
+        for trial_x, trial_y in trial_fits:
+            aligned = self._iad_arrays_from_fit(trial_x, trial_y, reference, warn=False)
+            prepared = self._satellite_iad_arrays_from_aligned(aligned, warn=False)
+            if prepared is None:
+                continue
+            x_aligned, roi_aligned, ref_aligned, transition_point = prepared
+            satellite_values.append(
+                _integrated_absolute_difference(
+                    x_aligned[:transition_point],
+                    roi_aligned[:transition_point],
+                    ref_aligned[:transition_point],
+                )
+            )
+            if len(x_aligned) > 0:
+                transition_fractions.append(float(transition_point) / float(len(x_aligned)))
+
+        satellite_values = np.asarray(satellite_values, dtype=float)
+        satellite_values = satellite_values[np.isfinite(satellite_values)]
+        transition_fractions = np.asarray(transition_fractions, dtype=float)
+        transition_fractions = transition_fractions[np.isfinite(transition_fractions)]
+        trial_count = int(mc_meta.get("trials", self._iad_mc_trial_count()))
+        min_success = min(IAD_MC_MIN_SUCCESS, max(8, trial_count // 5))
+        if satellite_values.size >= min_success:
+            sample_mc_error = float(np.nanstd(satellite_values, ddof=1))
+            mc_mean = float(np.nanmean(satellite_values))
+            mc_median = float(np.nanmedian(satellite_values))
+        else:
+            sample_mc_error = np.nan
+            mc_mean = np.nan
+            mc_median = np.nan
+
+        if transition_fractions.size:
+            satellite_fraction = float(np.nanmedian(transition_fractions))
+        else:
+            satellite_fraction = np.nan
+        ref_satellite_scatter = _reference_fractional_scatter_error(reference, satellite_fraction)
+        if not np.isfinite(ref_satellite_scatter):
+            ref_satellite_scatter = reference.get('reference_mean_scatter_error', np.nan)
+        total_error = _quadrature(sample_mc_error, ref_satellite_scatter)
+        return {
+            "satellite_iad_error": total_error,
+            "satellite_sample_mc_error": sample_mc_error,
+            "satellite_reference_scatter_error": ref_satellite_scatter,
+            "satellite_fraction": satellite_fraction,
+            "sample_residual_score": self._current_peak_fit_error(),
+            "mc_trials": trial_count,
+            "mc_success": int(satellite_values.size),
+            "mc_failures": int(mc_meta.get("failures", 0)),
+            "mc_mean": mc_mean,
+            "mc_median": mc_median,
+        }
+
     def _iad_baseline_alignment_enabled(self):
         return not hasattr(self, 'iad_baseline_check') or self.iad_baseline_check.isChecked()
 
-    def _aligned_iad_arrays(self, reference):
-        current = self._current_peak_fit_xy()
-        if current is None:
+    def _iad_arrays_from_fit(self, current_x, current_y, reference, warn=True):
+        current_x = np.asarray(current_x, dtype=float)
+        current_y = np.asarray(current_y, dtype=float)
+        current_finite = np.isfinite(current_x) & np.isfinite(current_y)
+        current_x = current_x[current_finite]
+        current_y = current_y[current_finite]
+        if current_x.size < 2:
             return None
-        current_x, current_y = current
+        current_order = np.argsort(current_x)
+        current_x = current_x[current_order]
+        current_y = current_y[current_order]
         ref_x = np.asarray(reference['x'], dtype=float)
         ref_y = np.asarray(reference['y'], dtype=float)
         finite = np.isfinite(ref_x) & np.isfinite(ref_y)
@@ -2406,11 +2968,12 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         max_x = min(float(np.nanmax(ref_x)), float(np.nanmax(current_x)))
         mask = (ref_x >= min_x) & (ref_x <= max_x)
         if np.count_nonzero(mask) < 2:
-            QtWidgets.QMessageBox.warning(
-                self,
-                "IAD",
-                f"{reference['label']} does not overlap the current peak-fit x range.",
-            )
+            if warn:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "IAD",
+                    f"{reference['label']} does not overlap the current peak-fit x range.",
+                )
             return None
         common_x = ref_x[mask]
         common_ref = ref_y[mask]
@@ -2420,19 +2983,28 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         normalized = _area_normalize_pair(common_x, common_roi, common_ref)
         return normalized if normalized[0].size >= 2 else None
 
-    def _satellite_controls(self, spectrum_len):
+    def _aligned_iad_arrays(self, reference):
+        current = self._current_peak_fit_xy()
+        if current is None:
+            return None
+        current_x, current_y = current
+        return self._iad_arrays_from_fit(current_x, current_y, reference)
+
+    def _satellite_controls(self, spectrum_len, warn=True):
         try:
             cross_begin = int(self.cross_begin.text().strip())
             cross_end = int(self.cross_end.text().strip())
         except ValueError:
-            QtWidgets.QMessageBox.warning(self, "Satellite IAD", "Spectra Cross values must be integers.")
+            if warn:
+                QtWidgets.QMessageBox.warning(self, "Satellite IAD", "Spectra Crossing Range values must be integers.")
             return None
 
         max_index = max(int(spectrum_len) - 1, 0)
         cross_begin = max(0, min(cross_begin, max_index))
         cross_end = max(0, min(cross_end, max_index))
         if cross_end <= cross_begin:
-            QtWidgets.QMessageBox.warning(self, "Satellite IAD", "Spectra Cross end must be greater than the start.")
+            if warn:
+                QtWidgets.QMessageBox.warning(self, "Satellite IAD", "Spectra Crossing Range end must be greater than the start.")
             return None
 
         eyeball_text = self.eye_ball_cross.text().strip()
@@ -2443,6 +3015,37 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         if eyeball_point is not None:
             eyeball_point = max(0, min(eyeball_point, max_index))
         return cross_begin, cross_end, eyeball_point
+
+    def _satellite_iad_arrays_from_aligned(self, aligned, warn=True):
+        if aligned is None:
+            return None
+        _x_data, roi_y, ref_y = aligned
+        try:
+            roi_aligned, ref_aligned = _align_spectra_by_main_peak(roi_y, ref_y)
+            ref_aligned, _tail_matched = _tail_area_match_to_target(ref_aligned, roi_aligned)
+            if self._iad_baseline_alignment_enabled():
+                roi_aligned, ref_aligned = _align_iad_baselines(roi_aligned, ref_aligned)
+            x_aligned = np.arange(len(roi_aligned), dtype=float)
+            x_aligned, roi_aligned, ref_aligned = _area_normalize_pair(x_aligned, roi_aligned, ref_aligned)
+        except ValueError as exc:
+            if warn:
+                QtWidgets.QMessageBox.warning(self, "Satellite IAD", str(exc))
+            return None
+        controls = self._satellite_controls(len(roi_aligned), warn=warn)
+        if controls is None:
+            return None
+        cross_begin, cross_end, eyeball_point = controls
+        transition_point = _find_satellite_transition(
+            roi_aligned,
+            ref_aligned,
+            cross_begin,
+            cross_end,
+            eyeball_point,
+        )
+        if transition_point is None:
+            transition_point = min(len(roi_aligned), len(ref_aligned))
+        transition_point = max(1, min(int(transition_point), min(len(roi_aligned), len(ref_aligned))))
+        return x_aligned, roi_aligned, ref_aligned, transition_point
 
     def _draw_iad_comparison(self, x_data, roi_y, ref_y, reference, diff_label, view_label, shade_end_index=None):
         self._clear_spectrum()
@@ -2506,13 +3109,13 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         if not path:
             return
         try:
-            x_data, y_data = _read_pkfit_peak_fit_spectrum(path)
+            x_data, y_data, reference_metadata = _read_pkfit_iad_reference(path)
         except Exception as exc:
             QtWidgets.QMessageBox.warning(self, "Import Ref.", str(exc))
             return
 
         basename = os.path.basename(path)
-        is_average_reference = _is_pkfit_reference_average(path)
+        is_average_reference = bool(reference_metadata.get("is_average", False))
         run_label = "Ref. average" if is_average_reference else _run_label_from_path(path)
         palette = ["#4daf4a", "#377eb8", "#984ea3", "#ff7f00", "#a65628", "#f781bf"]
         reference = {
@@ -2521,9 +3124,39 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
             'y': y_data,
             'label': run_label,
             'is_average': is_average_reference,
+            'fit_error': reference_metadata.get("fit_error", np.nan),
+            'average_reference_fit_error': reference_metadata.get("average_reference_fit_error", np.nan),
+            'reference_mean_scatter_error': reference_metadata.get("reference_mean_scatter_error", np.nan),
+            'total_reference_error': reference_metadata.get("total_reference_error", np.nan),
+            'reference_scatter_x': reference_metadata.get("reference_scatter_x", np.array([], dtype=float)),
+            'reference_scatter_mean': reference_metadata.get("reference_scatter_mean", np.array([], dtype=float)),
+            'reference_scatter_std': reference_metadata.get("reference_scatter_std", np.array([], dtype=float)),
+            'reference_scatter_valid_n': reference_metadata.get("reference_scatter_valid_n", np.array([], dtype=float)),
             'color': palette[len(self.reference_spectra) % len(palette)],
             'iad': None,
+            'iad_error': None,
+            'iad_error_method': "",
+            'iad_sample_mc_error': None,
+            'iad_sample_residual_score': None,
+            'iad_reference_fit_score': None,
+            'iad_reference_scatter_error': None,
+            'iad_reference_total_score': None,
+            'iad_mc_trials': None,
+            'iad_mc_success': None,
+            'iad_mc_failures': None,
+            'iad_mc_mean': None,
+            'iad_mc_median': None,
             'satellite_iad': None,
+            'satellite_iad_error': None,
+            'satellite_iad_error_method': "",
+            'satellite_sample_mc_error': None,
+            'satellite_reference_scatter_error': None,
+            'satellite_fraction': None,
+            'satellite_mc_trials': None,
+            'satellite_mc_success': None,
+            'satellite_mc_failures': None,
+            'satellite_mc_mean': None,
+            'satellite_mc_median': None,
             'satellite_cross_point': None,
         }
         self.reference_spectra.append(reference)
@@ -2552,7 +3185,7 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
     def plot_integrated_diff(self):
         indices = self._checked_iad_reference_indices()
         if not indices:
-            QtWidgets.QMessageBox.information(self, "Integrated Diff.", "Select or import a pkfit reference first.")
+            QtWidgets.QMessageBox.information(self, "IAD", "Select or import a pkfit reference first.")
             return
         last_plot = None
         for row in indices:
@@ -2563,57 +3196,101 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
             x_data, roi_y, ref_y = aligned
             iad_value = _integrated_absolute_difference(x_data, roi_y, ref_y)
             reference['iad'] = iad_value
+            reference['iad_error'] = None
+            reference['iad_error_method'] = ""
+            reference['iad_sample_mc_error'] = None
+            reference['iad_sample_residual_score'] = None
+            reference['iad_reference_fit_score'] = None
+            reference['iad_reference_scatter_error'] = None
+            reference['iad_reference_total_score'] = None
+            reference['iad_mc_trials'] = None
+            reference['iad_mc_success'] = None
+            reference['iad_mc_failures'] = None
+            reference['iad_mc_mean'] = None
+            reference['iad_mc_median'] = None
             self._set_iad_table_value(row, 2, f"{iad_value:.6g}")
+            self._set_iad_table_value(row, 3, "")
             last_plot = (x_data, roi_y, ref_y, reference)
         if last_plot is None:
             return
-        self._draw_iad_comparison(*last_plot, diff_label="Integrated Diff.", view_label="IAD difference")
-        self.statusBar().showMessage(f"Calculated IAD for {len(indices)} reference(s)")
+        self._draw_iad_comparison(*last_plot, diff_label="IAD", view_label="IAD difference")
+        self.statusBar().showMessage(f"Calculated IAD for {len(indices)} reference(s); click IAD Error for MC uncertainty")
+
+    def calculate_iad_error(self):
+        indices = self._checked_iad_reference_indices()
+        if not indices:
+            QtWidgets.QMessageBox.information(self, "IAD Error", "Select or import a pkfit reference first.")
+            return
+        last_plot = None
+        trial_count = self._iad_mc_trial_count()
+        self.statusBar().showMessage(f"Calculating MC IAD uncertainty ({trial_count} trials)...")
+        QtWidgets.QApplication.processEvents()
+        QtWidgets.QApplication.setOverrideCursor(_wait_cursor())
+        try:
+            for row in indices:
+                reference = self.reference_spectra[row]
+                aligned = self._aligned_iad_arrays(reference)
+                if aligned is None:
+                    continue
+                x_data, roi_y, ref_y = aligned
+                iad_value = _integrated_absolute_difference(x_data, roi_y, ref_y)
+                iad_uncertainty = self._iad_uncertainty(reference)
+                iad_error = float(iad_uncertainty.get("iad_error", np.nan))
+                reference['iad'] = iad_value
+                reference['iad_error'] = None if not np.isfinite(iad_error) else iad_error
+                reference['iad_error_method'] = "MC refit + reference scatter"
+                reference['iad_sample_mc_error'] = iad_uncertainty.get("sample_mc_error")
+                reference['iad_sample_residual_score'] = iad_uncertainty.get("sample_residual_score")
+                reference['iad_reference_fit_score'] = iad_uncertainty.get("reference_fit_score")
+                reference['iad_reference_scatter_error'] = iad_uncertainty.get("reference_scatter_error")
+                reference['iad_reference_total_score'] = iad_uncertainty.get("reference_total_score")
+                reference['iad_mc_trials'] = iad_uncertainty.get("mc_trials")
+                reference['iad_mc_success'] = iad_uncertainty.get("mc_success")
+                reference['iad_mc_failures'] = iad_uncertainty.get("mc_failures")
+                reference['iad_mc_mean'] = iad_uncertainty.get("mc_mean")
+                reference['iad_mc_median'] = iad_uncertainty.get("mc_median")
+                self._set_iad_table_value(row, 2, f"{iad_value:.6g}")
+                self._set_iad_table_value(row, 3, "" if not np.isfinite(iad_error) else f"{iad_error:.6g}")
+                last_plot = (x_data, roi_y, ref_y, reference)
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        if last_plot is None:
+            return
+        self._draw_iad_comparison(*last_plot, diff_label="IAD", view_label="IAD difference")
+        self.statusBar().showMessage(f"Calculated MC IAD uncertainty for {len(indices)} reference(s)")
 
     def calculate_satellite_iad(self):
         indices = self._checked_iad_reference_indices()
         if not indices:
-            QtWidgets.QMessageBox.information(self, "Satellite Diff.", "Select or import a pkfit reference first.")
+            QtWidgets.QMessageBox.information(self, "Satellite IAD", "Select or import a pkfit reference first.")
             return
         last_plot = None
         for row in indices:
             reference = self.reference_spectra[row]
             aligned = self._aligned_iad_arrays(reference)
-            if aligned is None:
+            prepared = self._satellite_iad_arrays_from_aligned(aligned)
+            if prepared is None:
                 continue
-            _x_data, roi_y, ref_y = aligned
-            try:
-                roi_aligned, ref_aligned = _align_spectra_by_main_peak(roi_y, ref_y)
-                ref_aligned, _tail_matched = _tail_area_match_to_target(ref_aligned, roi_aligned)
-                if self._iad_baseline_alignment_enabled():
-                    roi_aligned, ref_aligned = _align_iad_baselines(roi_aligned, ref_aligned)
-                x_aligned = np.arange(len(roi_aligned), dtype=float)
-                x_aligned, roi_aligned, ref_aligned = _area_normalize_pair(x_aligned, roi_aligned, ref_aligned)
-            except ValueError as exc:
-                QtWidgets.QMessageBox.warning(self, "Satellite IAD", str(exc))
-                continue
-            controls = self._satellite_controls(len(roi_aligned))
-            if controls is None:
-                return
-            cross_begin, cross_end, eyeball_point = controls
-            transition_point = _find_satellite_transition(
-                roi_aligned,
-                ref_aligned,
-                cross_begin,
-                cross_end,
-                eyeball_point,
-            )
-            if transition_point is None:
-                transition_point = min(len(roi_aligned), len(ref_aligned))
-            transition_point = max(1, min(int(transition_point), min(len(roi_aligned), len(ref_aligned))))
+            x_aligned, roi_aligned, ref_aligned, transition_point = prepared
             satellite_value = _integrated_absolute_difference(
                 x_aligned[:transition_point],
                 roi_aligned[:transition_point],
                 ref_aligned[:transition_point],
             )
             reference['satellite_iad'] = satellite_value
+            reference['satellite_iad_error'] = None
+            reference['satellite_iad_error_method'] = ""
+            reference['satellite_sample_mc_error'] = None
+            reference['satellite_reference_scatter_error'] = None
+            reference['satellite_mc_trials'] = None
+            reference['satellite_mc_success'] = None
+            reference['satellite_mc_failures'] = None
+            reference['satellite_mc_mean'] = None
+            reference['satellite_mc_median'] = None
+            reference['satellite_fraction'] = None
             reference['satellite_cross_point'] = transition_point
-            self._set_iad_table_value(row, 3, f"{satellite_value:.6g}")
+            self._set_iad_table_value(row, 4, f"{satellite_value:.6g}")
+            self._set_iad_table_value(row, 5, "")
             last_plot = (
                 x_aligned,
                 roi_aligned,
@@ -2624,27 +3301,84 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
             return
         self._draw_iad_comparison(
             *last_plot,
-            diff_label="Satellite Diff.",
+            diff_label="Satellite IAD",
             view_label="Satellite IAD",
             shade_end_index=last_plot[3].get('satellite_cross_point'),
         )
         self.statusBar().showMessage(f"Calculated satellite IAD for {len(indices)} reference(s)")
 
+    def calculate_satellite_iad_error(self):
+        indices = self._checked_iad_reference_indices()
+        if not indices:
+            QtWidgets.QMessageBox.information(self, "Satellite IAD error", "Select or import a pkfit reference first.")
+            return
+        last_plot = None
+        trial_count = self._iad_mc_trial_count()
+        self.statusBar().showMessage(f"Calculating MC satellite IAD uncertainty ({trial_count} trials)...")
+        QtWidgets.QApplication.processEvents()
+        QtWidgets.QApplication.setOverrideCursor(_wait_cursor())
+        try:
+            for row in indices:
+                reference = self.reference_spectra[row]
+                aligned = self._aligned_iad_arrays(reference)
+                prepared = self._satellite_iad_arrays_from_aligned(aligned)
+                if prepared is None:
+                    continue
+                x_aligned, roi_aligned, ref_aligned, transition_point = prepared
+                satellite_value = _integrated_absolute_difference(
+                    x_aligned[:transition_point],
+                    roi_aligned[:transition_point],
+                    ref_aligned[:transition_point],
+                )
+                satellite_uncertainty = self._satellite_iad_uncertainty(reference)
+                satellite_error = float(satellite_uncertainty.get("satellite_iad_error", np.nan))
+                reference['satellite_iad'] = satellite_value
+                reference['satellite_iad_error'] = None if not np.isfinite(satellite_error) else satellite_error
+                reference['satellite_iad_error_method'] = "MC refit + satellite reference scatter"
+                reference['satellite_sample_mc_error'] = satellite_uncertainty.get("satellite_sample_mc_error")
+                reference['satellite_reference_scatter_error'] = satellite_uncertainty.get("satellite_reference_scatter_error")
+                reference['satellite_fraction'] = satellite_uncertainty.get("satellite_fraction")
+                reference['satellite_mc_trials'] = satellite_uncertainty.get("mc_trials")
+                reference['satellite_mc_success'] = satellite_uncertainty.get("mc_success")
+                reference['satellite_mc_failures'] = satellite_uncertainty.get("mc_failures")
+                reference['satellite_mc_mean'] = satellite_uncertainty.get("mc_mean")
+                reference['satellite_mc_median'] = satellite_uncertainty.get("mc_median")
+                reference['satellite_cross_point'] = transition_point
+                self._set_iad_table_value(row, 4, f"{satellite_value:.6g}")
+                self._set_iad_table_value(row, 5, "" if not np.isfinite(satellite_error) else f"{satellite_error:.6g}")
+                last_plot = (
+                    x_aligned,
+                    roi_aligned,
+                    ref_aligned,
+                    reference,
+                )
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        if last_plot is None:
+            return
+        self._draw_iad_comparison(
+            *last_plot,
+            diff_label="Satellite IAD",
+            view_label="Satellite IAD",
+            shade_end_index=last_plot[3].get('satellite_cross_point'),
+        )
+        self.statusBar().showMessage(f"Calculated MC satellite IAD uncertainty for {len(indices)} reference(s)")
+
     def save_iad_results(self):
         if not self.reference_spectra:
-            QtWidgets.QMessageBox.information(self, "Save IAD", "Import a pkfit reference first.")
+            QtWidgets.QMessageBox.information(self, "Export IAD Values", "Import a pkfit reference first.")
             return
         indices = self._checked_iad_reference_indices()
         if not indices:
-            QtWidgets.QMessageBox.information(self, "Save IAD", "Select at least one reference row before saving.")
+            QtWidgets.QMessageBox.information(self, "Export IAD Values", "Select at least one reference row before exporting.")
             return
         references = [self.reference_spectra[index] for index in indices]
         if all(reference.get('iad') is None and reference.get('satellite_iad') is None for reference in references):
-            QtWidgets.QMessageBox.information(self, "Save IAD", "Calculate IAD before saving.")
+            QtWidgets.QMessageBox.information(self, "Export IAD Values", "Calculate IAD before exporting.")
             return
         path, _selected = QtWidgets.QFileDialog.getSaveFileName(
             self,
-            "Save IAD results",
+            "Export IAD values",
             self._default_save_path(f"{self._run_basename()}_iad.txt"),
             "Text data (*.txt);;CSV data (*.csv);;All files (*.*)",
         )
@@ -2656,14 +3390,99 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
             writer.writerow(["Current run", self._run_display_text()])
             writer.writerow(["Baseline aligned", self._iad_baseline_alignment_enabled()])
             writer.writerow(["Area normalized", True])
-            writer.writerow(["Spectra cross", self.cross_begin.text().strip(), self.cross_end.text().strip()])
-            writer.writerow(["Eye ball cross", self.eye_ball_cross.text().strip()])
-            writer.writerow(["Reference run", "IAD", "Satellite IAD", "Satellite cross point", "Reference file"])
+            writer.writerow(["Spectra Crossing Range", self.cross_begin.text().strip(), self.cross_end.text().strip()])
+            writer.writerow(["Manual crossing", self.eye_ball_cross.text().strip()])
+            writer.writerow(["IAD error method", "MC refit sample uncertainty + reference scatter"])
+            writer.writerow(["Satellite IAD error method", "MC refit with recalculated crossing + satellite reference scatter"])
+            writer.writerow(["IAD Monte Carlo trials setting", self._iad_mc_trial_count()])
+            writer.writerow(
+                [
+                    "Reference run",
+                    "IAD",
+                    "IAD error",
+                    "Sample MC error",
+                    "Sample residual score",
+                    "Reference scatter error",
+                    "Reference fit score",
+                    "Reference total score",
+                    "Monte Carlo trials",
+                    "MC success",
+                    "MC mean IAD",
+                    "MC median IAD",
+                    "Satellite IAD",
+                    "Satellite IAD error",
+                    "Satellite sample MC error",
+                    "Satellite reference scatter error",
+                    "Satellite fraction",
+                    "Satellite Monte Carlo trials",
+                    "Satellite MC success",
+                    "Satellite MC mean IAD",
+                    "Satellite MC median IAD",
+                    "Satellite cross point",
+                    "Reference file",
+                ]
+            )
             for reference in references:
-                iad_value = "" if reference.get('iad') is None else f"{reference['iad']:.10g}"
-                satellite_value = "" if reference.get('satellite_iad') is None else f"{reference['satellite_iad']:.10g}"
+                iad_value = _format_optional_float(reference.get('iad'))
+                iad_error = _format_optional_float(reference.get('iad_error'))
+                sample_mc_error = _format_optional_float(reference.get('iad_sample_mc_error'))
+                sample_residual_score = _format_optional_float(reference.get('iad_sample_residual_score'))
+                ref_scatter_error = _format_optional_float(reference.get('iad_reference_scatter_error'))
+                ref_fit_score = _format_optional_float(reference.get('iad_reference_fit_score'))
+                ref_total_score = _format_optional_float(reference.get('iad_reference_total_score'))
+                try:
+                    mc_trials = str(int(reference.get('iad_mc_trials')))
+                except (TypeError, ValueError):
+                    mc_trials = ""
+                try:
+                    mc_success = str(int(reference.get('iad_mc_success')))
+                except (TypeError, ValueError):
+                    mc_success = ""
+                mc_mean = _format_optional_float(reference.get('iad_mc_mean'))
+                mc_median = _format_optional_float(reference.get('iad_mc_median'))
+                satellite_value = _format_optional_float(reference.get('satellite_iad'))
+                satellite_error = _format_optional_float(reference.get('satellite_iad_error'))
+                satellite_sample_mc_error = _format_optional_float(reference.get('satellite_sample_mc_error'))
+                satellite_reference_scatter_error = _format_optional_float(reference.get('satellite_reference_scatter_error'))
+                satellite_fraction = _format_optional_float(reference.get('satellite_fraction'))
+                try:
+                    satellite_mc_trials = str(int(reference.get('satellite_mc_trials')))
+                except (TypeError, ValueError):
+                    satellite_mc_trials = ""
+                try:
+                    satellite_mc_success = str(int(reference.get('satellite_mc_success')))
+                except (TypeError, ValueError):
+                    satellite_mc_success = ""
+                satellite_mc_mean = _format_optional_float(reference.get('satellite_mc_mean'))
+                satellite_mc_median = _format_optional_float(reference.get('satellite_mc_median'))
                 cross_point = "" if reference.get('satellite_cross_point') is None else reference['satellite_cross_point']
-                writer.writerow([reference['label'], iad_value, satellite_value, cross_point, reference['path']])
+                writer.writerow(
+                    [
+                        reference['label'],
+                        iad_value,
+                        iad_error,
+                        sample_mc_error,
+                        sample_residual_score,
+                        ref_scatter_error,
+                        ref_fit_score,
+                        ref_total_score,
+                        mc_trials,
+                        mc_success,
+                        mc_mean,
+                        mc_median,
+                        satellite_value,
+                        satellite_error,
+                        satellite_sample_mc_error,
+                        satellite_reference_scatter_error,
+                        satellite_fraction,
+                        satellite_mc_trials,
+                        satellite_mc_success,
+                        satellite_mc_mean,
+                        satellite_mc_median,
+                        cross_point,
+                        reference['path'],
+                    ]
+                )
         self.statusBar().showMessage(f"Saved IAD results: {path}")
 
     def _calibration_fit_config(self):
@@ -2752,7 +3571,12 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
             if hasattr(self, attr_name):
                 delattr(self, attr_name)
         self._clear_calibration_outputs(clear_current=False)
-        self._add_imported_spectrum_curve(x_data, y_display, f"Cal, {basename}", color="#8db7ff", clear_if_empty=True)
+        self._clear_spectrum()
+        self.last_x = np.array([], dtype=float)
+        self.last_y = np.array([], dtype=float)
+        self.last_raw_x = np.array([], dtype=float)
+        self.last_raw_y = np.array([], dtype=float)
+        self._add_imported_spectrum_curve(x_data, y_display, f"Cal, {basename}", color="#8db7ff", clear_if_empty=False)
         self._update_spectrum_header("Calibration")
         self.statusBar().showMessage(f"Imported calibration spectrum: {basename}")
 
@@ -2967,11 +3791,11 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         if calibration is None:
             return
         if self.last_x.size == 0 or self.last_y.size == 0:
-            QtWidgets.QMessageBox.warning(self, "Save Cal.", "Plot the current spectrum first.")
+            QtWidgets.QMessageBox.warning(self, "Export Cal.", "Plot the current spectrum first.")
             return
         path, _selected = QtWidgets.QFileDialog.getSaveFileName(
             self,
-            "Save calibrated spectrum",
+            "Export calibrated spectrum",
             self._default_save_path(f"{self._run_basename()}_calibrated_spectrum.txt"),
             "Text data (*.txt);;CSV data (*.csv);;All files (*.*)",
         )
@@ -3030,8 +3854,34 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
                     "label": reference.get("label", ""),
                     "is_average": bool(reference.get("is_average", False)),
                     "color": reference.get("color", "#4daf4a"),
+                    "fit_error": reference.get("fit_error"),
+                    "average_reference_fit_error": reference.get("average_reference_fit_error"),
+                    "reference_mean_scatter_error": reference.get("reference_mean_scatter_error"),
+                    "total_reference_error": reference.get("total_reference_error"),
                     "iad": reference.get("iad"),
+                    "iad_error": reference.get("iad_error"),
+                    "iad_error_method": reference.get("iad_error_method"),
+                    "iad_sample_mc_error": reference.get("iad_sample_mc_error"),
+                    "iad_sample_residual_score": reference.get("iad_sample_residual_score"),
+                    "iad_reference_fit_score": reference.get("iad_reference_fit_score"),
+                    "iad_reference_scatter_error": reference.get("iad_reference_scatter_error"),
+                    "iad_reference_total_score": reference.get("iad_reference_total_score"),
+                    "iad_mc_trials": reference.get("iad_mc_trials"),
+                    "iad_mc_success": reference.get("iad_mc_success"),
+                    "iad_mc_failures": reference.get("iad_mc_failures"),
+                    "iad_mc_mean": reference.get("iad_mc_mean"),
+                    "iad_mc_median": reference.get("iad_mc_median"),
                     "satellite_iad": reference.get("satellite_iad"),
+                    "satellite_iad_error": reference.get("satellite_iad_error"),
+                    "satellite_iad_error_method": reference.get("satellite_iad_error_method"),
+                    "satellite_sample_mc_error": reference.get("satellite_sample_mc_error"),
+                    "satellite_reference_scatter_error": reference.get("satellite_reference_scatter_error"),
+                    "satellite_fraction": reference.get("satellite_fraction"),
+                    "satellite_mc_trials": reference.get("satellite_mc_trials"),
+                    "satellite_mc_success": reference.get("satellite_mc_success"),
+                    "satellite_mc_failures": reference.get("satellite_mc_failures"),
+                    "satellite_mc_mean": reference.get("satellite_mc_mean"),
+                    "satellite_mc_median": reference.get("satellite_mc_median"),
                     "satellite_cross_point": reference.get("satellite_cross_point"),
                 }
             )
@@ -3050,8 +3900,8 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
                 "roi2_enabled": self.roi2_check.isChecked() if hasattr(self, 'roi2_check') else False,
                 "roi_columns": self.col_range(),
                 "bg_rows": self.bg_ranges(),
-                "gap_enabled": self.gap_check.isChecked() if hasattr(self, 'gap_check') else True,
-                "bg_enabled": self.bg_check.isChecked() if hasattr(self, 'bg_check') else False,
+                "gap_enabled": self._gap_correction_enabled() if hasattr(self, 'gap_check') else True,
+                "bg_enabled": self._background_removal_enabled() if hasattr(self, 'bg_check') else False,
                 "line_color": self.line_color.name() if hasattr(self, 'line_color') else "#202020",
                 "line_style": self.line_style_combo.currentText() if hasattr(self, 'line_style_combo') else "-",
                 "line_width": self.line_width_spin.value() if hasattr(self, 'line_width_spin') else 1.6,
@@ -3104,19 +3954,25 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
             ref_group = refs_group.create_group(f"ref_{index}")
             _write_array(ref_group, "x", reference.get("x", []))
             _write_array(ref_group, "y", reference.get("y", []))
+            _write_array(ref_group, "reference_scatter_x", reference.get("reference_scatter_x", []))
+            _write_array(ref_group, "reference_scatter_mean", reference.get("reference_scatter_mean", []))
+            _write_array(ref_group, "reference_scatter_std", reference.get("reference_scatter_std", []))
+            _write_array(ref_group, "reference_scatter_valid_n", reference.get("reference_scatter_valid_n", []))
 
     def save_project(self):
         if h5py is None:
-            QtWidgets.QMessageBox.warning(self, "Save Project", "h5py is required to save IXE project files.")
+            QtWidgets.QMessageBox.warning(self, "Export Project", "h5py is required to save IXE project files.")
             return
-        path, _selected = QtWidgets.QFileDialog.getSaveFileName(
-            self,
-            "Save IXE project",
-            self._default_save_path(f"{self._run_basename()}.ixeproj"),
-            "IXE project (*.ixeproj);;HDF5 files (*.h5 *.hdf5);;All files (*.*)",
-        )
+        path = getattr(self, "current_project_path", "")
         if not path:
-            return
+            path, _selected = QtWidgets.QFileDialog.getSaveFileName(
+                self,
+                "Save IXE project",
+                self._default_save_path(f"{self._run_basename()}.ixeproj"),
+                "IXE project (*.ixeproj);;HDF5 files (*.h5 *.hdf5);;All files (*.*)",
+            )
+            if not path:
+                return
         try:
             manifest = self._project_manifest()
             with h5py.File(path, "w") as h5_file:
@@ -3126,8 +3982,9 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
                 h5_file.attrs["version"] = PROJECT_VERSION
                 self._write_project_arrays(h5_file)
         except Exception as exc:
-            QtWidgets.QMessageBox.warning(self, "Save Project", str(exc))
+            QtWidgets.QMessageBox.warning(self, "Export Project", str(exc))
             return
+        self.current_project_path = path
         self.statusBar().showMessage(f"Project saved: {path}")
 
     def _restore_project_ui(self, manifest):
@@ -3150,17 +4007,16 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
             if index >= 0:
                 self.cmap_combo.setCurrentIndex(index)
 
-        self.gap_check.setChecked(bool(ui.get("gap_enabled", self.gap_check.isChecked())))
-        self.bg_check.setChecked(bool(ui.get("bg_enabled", self.bg_check.isChecked())))
-        self._set_toggle_style(self.gap_check, self.gap_check.isChecked(), "Gap Mask (ON)", "Gap Mask")
-        self._set_toggle_style(self.bg_check, self.bg_check.isChecked(), "BG Remove (ON)", "BG Remove (OFF)")
+        if hasattr(self, 'gap_enabled_check'):
+            self.gap_enabled_check.setChecked(bool(ui.get("gap_enabled", self._gap_correction_enabled())))
+        if hasattr(self, 'bg_enabled_check'):
+            self.bg_enabled_check.setChecked(bool(ui.get("bg_enabled", self._background_removal_enabled())))
         peak_defaults = self.parm.get("peak_fit", {}) or {}
         if hasattr(self, 'physical_fit_check'):
             self.physical_fit_check.setChecked(bool(peak_defaults.get("physical_fit", self.physical_fit_check.isChecked())))
         if hasattr(self, 'tail_baseline_check'):
             self.tail_baseline_check.setChecked(bool(peak_defaults.get("tail_baseline", self.tail_baseline_check.isChecked())))
         self.current_tilt_text = ui.get("current_tilt_text", "Tilt: --")
-        self.image_status.setText(self.current_tilt_text)
         if hasattr(self, 'manual_tilt_spin'):
             self.manual_tilt_spin.setValue(float(ui.get("manual_tilt", self.manual_tilt_spin.value())))
         self.line_color = QtGui.QColor(ui.get("line_color", "#202020"))
@@ -3209,6 +4065,8 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         peak_meta = manifest.get("peak_fit")
         if peak_meta and "peak_fit" in h5_file:
             self.last_peak_fit_profile = _read_fit_group(h5_file["peak_fit"], peak_meta)
+            if hasattr(self, 'last_iad_mc_sample'):
+                del self.last_iad_mc_sample
             if self.last_peak_fit_profile is not None:
                 self._update_peak_fit_results(self.last_peak_fit_profile)
 
@@ -3285,19 +4143,53 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
                 "label": meta.get("label", f"Ref {index + 1}"),
                 "is_average": bool(meta.get("is_average", False)),
                 "color": meta.get("color", "#4daf4a"),
+                "fit_error": meta.get("fit_error"),
+                "average_reference_fit_error": meta.get("average_reference_fit_error"),
+                "reference_mean_scatter_error": meta.get("reference_mean_scatter_error"),
+                "total_reference_error": meta.get("total_reference_error"),
                 "iad": meta.get("iad"),
+                "iad_error": meta.get("iad_error"),
+                "iad_error_method": meta.get("iad_error_method"),
+                "iad_sample_mc_error": meta.get("iad_sample_mc_error"),
+                "iad_sample_residual_score": meta.get("iad_sample_residual_score"),
+                "iad_reference_fit_score": meta.get("iad_reference_fit_score"),
+                "iad_reference_scatter_error": meta.get("iad_reference_scatter_error"),
+                "iad_reference_total_score": meta.get("iad_reference_total_score"),
+                "iad_mc_trials": meta.get("iad_mc_trials"),
+                "iad_mc_success": meta.get("iad_mc_success"),
+                "iad_mc_failures": meta.get("iad_mc_failures"),
+                "iad_mc_mean": meta.get("iad_mc_mean"),
+                "iad_mc_median": meta.get("iad_mc_median"),
                 "satellite_iad": meta.get("satellite_iad"),
+                "satellite_iad_error": meta.get("satellite_iad_error"),
+                "satellite_iad_error_method": meta.get("satellite_iad_error_method"),
+                "satellite_sample_mc_error": meta.get("satellite_sample_mc_error"),
+                "satellite_reference_scatter_error": meta.get("satellite_reference_scatter_error"),
+                "satellite_fraction": meta.get("satellite_fraction"),
+                "satellite_mc_trials": meta.get("satellite_mc_trials"),
+                "satellite_mc_success": meta.get("satellite_mc_success"),
+                "satellite_mc_failures": meta.get("satellite_mc_failures"),
+                "satellite_mc_mean": meta.get("satellite_mc_mean"),
+                "satellite_mc_median": meta.get("satellite_mc_median"),
                 "satellite_cross_point": meta.get("satellite_cross_point"),
                 "x": _read_array(ref_group, "x", np.array([], dtype=float)),
                 "y": _read_array(ref_group, "y", np.array([], dtype=float)),
+                "reference_scatter_x": _read_array(ref_group, "reference_scatter_x", np.array([], dtype=float)),
+                "reference_scatter_mean": _read_array(ref_group, "reference_scatter_mean", np.array([], dtype=float)),
+                "reference_scatter_std": _read_array(ref_group, "reference_scatter_std", np.array([], dtype=float)),
+                "reference_scatter_valid_n": _read_array(ref_group, "reference_scatter_valid_n", np.array([], dtype=float)),
             }
             self.reference_spectra.append(reference)
             self._insert_iad_reference_row(reference)
             row = self.iad_line_table.rowCount() - 1
             if reference.get("iad") is not None:
-                self._set_iad_table_value(row, 2, f"{float(reference['iad']):.6g}")
+                self._set_iad_table_value(row, 2, _format_fit_value(reference.get("iad")))
+            if reference.get("iad_error") is not None:
+                self._set_iad_table_value(row, 3, _format_fit_value(reference.get("iad_error")))
             if reference.get("satellite_iad") is not None:
-                self._set_iad_table_value(row, 3, f"{float(reference['satellite_iad']):.6g}")
+                self._set_iad_table_value(row, 4, _format_fit_value(reference.get("satellite_iad")))
+            if reference.get("satellite_iad_error") is not None:
+                self._set_iad_table_value(row, 5, _format_fit_value(reference.get("satellite_iad_error")))
 
     def open_project(self):
         if h5py is None:
@@ -3367,6 +4259,7 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         except Exception as exc:
             QtWidgets.QMessageBox.warning(self, "Open Project", str(exc))
             return
+        self.current_project_path = path
         self.statusBar().showMessage(f"Project opened: {path}")
 
     def _spin(self):
@@ -3456,7 +4349,7 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
                 self.bg2_row_end: second_right,
             }
         )
-        if self.last_x.size and self.bg_check.isChecked():
+        if self.last_x.size and self._background_removal_enabled():
             self.plot_spectrum()
 
     def _update_roi2_widgets(self):
@@ -3527,17 +4420,25 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         if self.processed_gap_mask is None:
             QtWidgets.QMessageBox.information(self, "Gap Mask", "Process an image before showing the gap mask.")
             return
-        self.gap_overlay_check.setChecked(True)
-        self.refresh_image()
+        self.display_image(self.immm, "Processed image + CCD gap mask")
+        mask = self.processed_gap_mask
+        if mask is not None and self.immm is not None and mask.shape == self.immm.shape:
+            overlay = np.zeros(mask.shape + (4,), dtype=np.ubyte)
+            overlay[mask, 0] = 155
+            overlay[mask, 3] = 120
+            item = pg.ImageItem(overlay)
+            item.setZValue(20)
+            self.image_plot.addItem(item)
+            self._image_region_items.append(item)
 
     def save_image_png(self):
         data = self.immm if self.immm is not None else self.imm
         if data is None:
-            QtWidgets.QMessageBox.information(self, "Save Image", "Import an image first.")
+            QtWidgets.QMessageBox.information(self, "Export Image", "Import an image first.")
             return
         path, _selected = QtWidgets.QFileDialog.getSaveFileName(
             self,
-            "Save displayed CCD view",
+            "Export displayed CCD view",
             self._default_save_path(f"{self._run_basename()}_ccd.png"),
             "PNG image (*.png)",
         )
@@ -3550,9 +4451,28 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         exporter.export(path)
         self.statusBar().showMessage(f"Saved CCD image: {path}")
 
+    def _gap_correction_enabled(self):
+        if hasattr(self, 'gap_enabled_check'):
+            return self.gap_enabled_check.isChecked()
+        return self.gap_check.isChecked() if hasattr(self, 'gap_check') else True
+
+    def _background_removal_enabled(self):
+        if hasattr(self, 'bg_enabled_check'):
+            return self.bg_enabled_check.isChecked()
+        return self.bg_check.isChecked() if hasattr(self, 'bg_check') else False
+
     def toggle_gap_correction(self, checked=None):
-        checked = self.gap_check.isChecked() if checked is None else bool(checked)
-        self._set_toggle_style(self.gap_check, checked, "Gap Mask (ON)", "Gap Mask (OFF)")
+        sender = self.sender()
+        if hasattr(self, 'gap_enabled_check'):
+            if sender is self.gap_check:
+                checked = not self.gap_enabled_check.isChecked()
+                self.gap_enabled_check.blockSignals(True)
+                self.gap_enabled_check.setChecked(checked)
+                self.gap_enabled_check.blockSignals(False)
+            else:
+                checked = self.gap_enabled_check.isChecked() if checked is None else self.gap_enabled_check.isChecked()
+        else:
+            checked = self.gap_check.isChecked() if checked is None else bool(checked)
         self.parm.setdefault('ccd_gap', {})['enabled'] = checked
         if self.spect_processor is not None:
             self.configure_processor()
@@ -3562,8 +4482,17 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
             self._update_spectrum_header()
 
     def toggle_background_removal(self, checked=None):
-        checked = self.bg_check.isChecked() if checked is None else bool(checked)
-        self._set_toggle_style(self.bg_check, checked, "BG Remove (ON)", "BG Remove (OFF)")
+        sender = self.sender()
+        if hasattr(self, 'bg_enabled_check'):
+            if sender is self.bg_check:
+                checked = not self.bg_enabled_check.isChecked()
+                self.bg_enabled_check.blockSignals(True)
+                self.bg_enabled_check.setChecked(checked)
+                self.bg_enabled_check.blockSignals(False)
+            else:
+                checked = self.bg_enabled_check.isChecked() if checked is None else self.bg_enabled_check.isChecked()
+        else:
+            checked = self.bg_check.isChecked() if checked is None else bool(checked)
         if self.spect_processor is not None:
             self.configure_processor()
         if self.last_x.size:
@@ -3657,8 +4586,12 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
             return None
 
     def _clear_peak_fit_results(self):
+        if hasattr(self, 'last_iad_mc_sample'):
+            del self.last_iad_mc_sample
         if hasattr(self, 'peak_fit_summary_label'):
             self.peak_fit_summary_label.setText("Peak fit parameters: not fitted")
+        if hasattr(self, 'peak_fit_error_entry'):
+            self.peak_fit_error_entry.clear()
         if hasattr(self, 'peak_fit_table'):
             self.peak_fit_table.setRowCount(0)
 
@@ -3671,6 +4604,8 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
             self.peak_fit_summary_label.setText(f"{physical_text}Pseudo-Voigt fit{baseline_text}; Lorentzian components: {len(rows)}")
         else:
             self.peak_fit_summary_label.setText(f"{physical_text}Lorentzian fit{baseline_text}; peaks: {len(rows)}")
+        if hasattr(self, 'peak_fit_error_entry'):
+            self.peak_fit_error_entry.setText(_format_fit_error(getattr(fit_result, 'relative_fit_error', np.nan)))
         self.peak_fit_table.setRowCount(len(rows))
         for row_index, row_values in enumerate(rows):
             for column_index, value in enumerate(row_values):
@@ -3692,6 +4627,8 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "Peak Fit", str(exc))
             return
         self.last_peak_fit_profile = fit_result
+        if hasattr(self, 'last_iad_mc_sample'):
+            del self.last_iad_mc_sample
         self._update_peak_fit_results(fit_result)
         self._set_spectrum_view_mode("fit")
         self._draw_peak_fit(fit_result)
@@ -3712,15 +4649,15 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
 
     def show_gap_corrected_spectrum(self):
         if self.last_x.size == 0:
-            QtWidgets.QMessageBox.information(self, "Gap C.", "Plot a spectrum first.")
+            QtWidgets.QMessageBox.information(self, "Corrected", "Plot a spectrum first.")
             return
         self._set_spectrum_view_mode("gap")
         self._draw_spectrum(
             self.last_x,
             self.last_y,
-            label="Gap C.",
-            show_gap_markers=self.gap_check.isChecked(),
-            view_label="Gap C.",
+            label="Corrected",
+            show_gap_markers=False,
+            view_label="Corrected",
         )
 
     def show_peak_fit_view(self):
@@ -3766,15 +4703,15 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
             self.spectrum_plot.addItem(tail_line)
             self.spectrum_plot.addItem(corrected_line)
             self._spectrum_items.extend([raw_line, tail_line, corrected_line])
-            self._legend.addItem(raw_line, "ROI raw")
+            self._legend.addItem(raw_line, "Raw")
             self._legend.addItem(tail_line, "Tail baseline")
-            self._legend.addItem(corrected_line, "ROI corrected")
+            self._legend.addItem(corrected_line, "Corrected")
             y_arrays.extend([raw_y, tail_baseline, fit_y])
         else:
             raw_line = pg.PlotDataItem(x_fit, raw_y, pen=pg.mkPen('#9a9a9a', width=1.0))
             self.spectrum_plot.addItem(raw_line)
             self._spectrum_items.append(raw_line)
-            self._legend.addItem(raw_line, "ROI spectrum")
+            self._legend.addItem(raw_line, "Spectrum")
             y_arrays.append(raw_y)
 
         fit_line = pg.PlotDataItem(fit_result.x, fit_result.normalized_fit, pen=self._selected_line_pen())
@@ -3783,10 +4720,12 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         self._legend.addItem(fit_line, "Peak fit")
 
         scale = _component_scale(fit_result)
+        component_y_arrays = []
         component_colors = ['#2b8cbe', '#e34a33', '#31a354', '#756bb1', '#fdae6b', '#636363']
         if scale is not None:
             for index, peak_curve in enumerate(fit_result.peak_curves):
                 component = np.asarray(peak_curve, dtype=float) / scale
+                component_y_arrays.append(component)
                 label = fit_result.peak_labels[index] if index < len(fit_result.peak_labels) else f"Peak {index + 1}"
                 component_line = pg.PlotDataItem(
                     fit_result.x,
@@ -3798,18 +4737,64 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
                 self._legend.addItem(component_line, _display_peak_label(label))
 
         y_arrays.append(fit_result.normalized_fit)
-        if scale is not None:
-            y_arrays.extend([np.asarray(curve, dtype=float) / scale for curve in fit_result.peak_curves])
+        y_arrays.extend(component_y_arrays)
+
+        residual = np.asarray(
+            getattr(fit_result, 'fit_residual', fit_y - fit_result.normalized_fit),
+            dtype=float,
+        )
+        if residual.shape == x_fit.shape and np.any(np.isfinite(residual)):
+            residual_abs = np.abs(residual[np.isfinite(residual)])
+            residual_max = float(np.nanmax(residual_abs)) if residual_abs.size else 0.0
+            if np.isfinite(residual_max) and residual_max > np.finfo(float).eps:
+                y_min, y_max = _finite_min_max(y_arrays)
+                y_span = max(y_max - y_min, np.finfo(float).eps)
+                residual_display_height = 0.12 * y_span
+                residual_scale = residual_display_height / residual_max
+                residual_zero = y_min - 0.12 * y_span
+                zero_y = np.full_like(x_fit, residual_zero, dtype=float)
+                residual_y = residual_zero + residual * residual_scale
+                positive_y = residual_zero + np.where(residual > 0, residual * residual_scale, 0.0)
+                negative_y = residual_zero + np.where(residual < 0, residual * residual_scale, 0.0)
+
+                zero_curve = pg.PlotDataItem(
+                    x_fit,
+                    zero_y,
+                    pen=pg.mkPen(QtGui.QColor(120, 120, 120, 150), width=0.8, style=QtCore.Qt.PenStyle.DotLine),
+                )
+                positive_curve = pg.PlotDataItem(x_fit, positive_y, pen=None)
+                negative_curve = pg.PlotDataItem(x_fit, negative_y, pen=None)
+                residual_line = pg.PlotDataItem(
+                    x_fit,
+                    residual_y,
+                    pen=pg.mkPen(QtGui.QColor(118, 72, 185, 210), width=0.9),
+                )
+                positive_fill = pg.FillBetweenItem(
+                    positive_curve,
+                    zero_curve,
+                    brush=pg.mkBrush(QtGui.QColor(150, 122, 235, 58)),
+                )
+                negative_fill = pg.FillBetweenItem(
+                    negative_curve,
+                    zero_curve,
+                    brush=pg.mkBrush(QtGui.QColor(236, 116, 136, 58)),
+                )
+                for item in (positive_curve, negative_curve, zero_curve, positive_fill, negative_fill, residual_line):
+                    self.spectrum_plot.addItem(item)
+                    self._spectrum_items.append(item)
+                self._legend.addItem(residual_line, "Fit residual (scaled)")
+                y_arrays.extend([positive_y, negative_y, zero_y])
+
         self._set_spectrum_view_range(x_fit, y_arrays)
         self._update_spectrum_header("Peak Fit")
 
     def save_spectrum_data(self):
         if self.last_x.size == 0:
-            QtWidgets.QMessageBox.information(self, "Save Spectrum", "Plot a spectrum first.")
+            QtWidgets.QMessageBox.information(self, "Export Spectrum", "Plot a spectrum first.")
             return
         path, _selected = QtWidgets.QFileDialog.getSaveFileName(
             self,
-            "Save spectrum data",
+            "Export spectrum data",
             self._default_save_path(f"{self._run_basename()}_spectrum.txt"),
             "Text data (*.txt);;CSV data (*.csv);;All files (*.*)",
         )
@@ -3819,8 +4804,8 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         with open(path, mode="w", newline="") as handle:
             writer = csv.writer(handle, delimiter=delimiter)
             writer.writerow([f"Run", self.run_label.text()])
-            writer.writerow(["Background removed", self.bg_check.isChecked()])
-            writer.writerow(["CCD gap corrected", self.gap_check.isChecked()])
+            writer.writerow(["Background removed", self._background_removal_enabled()])
+            writer.writerow(["CCD gap corrected", self._gap_correction_enabled()])
             writer.writerow(["ROI Rows", "; ".join(f"{begin}-{end}" for begin, end in self.roi_ranges())])
             writer.writerow(["ROI Columns", f"{self.col_range()[0]}-{self.col_range()[1]}"])
             writer.writerow(["BG Rows", "; ".join(f"{begin}-{end}" for begin, end in self.bg_ranges())])
@@ -3831,11 +4816,11 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
 
     def save_peak_fit_parameters(self):
         if not hasattr(self, 'last_peak_fit_profile'):
-            QtWidgets.QMessageBox.information(self, "Save Params", "Run Peak Fit before saving peak parameters.")
+            QtWidgets.QMessageBox.information(self, "Export Params", "Run Peak Fit before exporting peak parameters.")
             return
         path, _selected = QtWidgets.QFileDialog.getSaveFileName(
             self,
-            "Save peak fit parameters",
+            "Export peak fit parameters",
             self._default_save_path(f"{self._run_basename()}_peak_params.txt"),
             "Text data (*.txt);;CSV data (*.csv);;All files (*.*)",
         )
@@ -3850,6 +4835,9 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
             writer.writerow(["Peak fit model", _peak_fit_model_label(model)])
             writer.writerow(["Physical fit", bool(getattr(fit_result, 'physical_fit', False))])
             writer.writerow(["Tail baseline", bool(getattr(fit_result, 'tail_baseline_enabled', False))])
+            writer.writerow(["Fit error", getattr(fit_result, 'relative_fit_error', np.nan)])
+            writer.writerow(["Fit residual area", getattr(fit_result, 'fit_residual_area', np.nan)])
+            writer.writerow(["Fit total corrected intensity", getattr(fit_result, 'fit_total_intensity', np.nan)])
             if model == "pseudo_voigt":
                 writer.writerow(["Lorentzian components", len(rows)])
             writer.writerow(["Peak", "Model", "Lorentzian fraction", "Position", "Width", "Area"])
@@ -3858,12 +4846,12 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
 
     def save_peak_fit_data(self):
         if not hasattr(self, 'last_peak_fit_profile'):
-            QtWidgets.QMessageBox.information(self, "Save pkfit", "Run Peak Fit before saving the fitted profile.")
+            QtWidgets.QMessageBox.information(self, "Export PKfit", "Run Peak Fit before exporting the fitted profile.")
             return
         fit_result = self.last_peak_fit_profile
         path, _selected = QtWidgets.QFileDialog.getSaveFileName(
             self,
-            "Save peak fit profile",
+            "Export peak fit profile",
             self._default_save_path(f"{self._run_basename()}_pkfit.txt"),
             "Text data (*.txt);;CSV data (*.csv);;All files (*.*)",
         )
@@ -3883,13 +4871,21 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
             writer.writerow(["Peak fit model", _peak_fit_model_label(getattr(fit_result, 'peak_shape', 'pseudo_voigt'))])
             writer.writerow(["Physical fit", bool(getattr(fit_result, 'physical_fit', False))])
             writer.writerow(["Tail baseline", bool(getattr(fit_result, 'tail_baseline_enabled', False))])
+            writer.writerow(["Fit error", getattr(fit_result, 'relative_fit_error', np.nan)])
+            writer.writerow(["Fit residual area", getattr(fit_result, 'fit_residual_area', np.nan)])
+            writer.writerow(["Fit total corrected intensity", getattr(fit_result, 'fit_total_intensity', np.nan)])
             writer.writerow(["Peak parameters"])
             writer.writerow(["Peak", "Lorentzian fraction", "Position", "Width", "Area"])
             for label, _model_label, fraction, center, width, area in _peak_fit_parameter_rows(fit_result):
                 writer.writerow([label, fraction, center, width, area])
             tail_baseline = np.asarray(getattr(fit_result, 'tail_baseline', np.zeros_like(fit_result.raw_y)), dtype=float)
             corrected_y = np.asarray(getattr(fit_result, 'fit_y', fit_result.raw_y), dtype=float)
-            writer.writerow(["X", "Raw Y", "Tail baseline", "Corrected Y", "Peak fit", *labels])
+            fit_residual = np.asarray(getattr(fit_result, 'fit_residual', corrected_y - fit_result.normalized_fit), dtype=float)
+            normalized_residual = np.asarray(
+                getattr(fit_result, 'normalized_fit_residual', np.full_like(fit_residual, np.nan, dtype=float)),
+                dtype=float,
+            )
+            writer.writerow(["X", "Raw Y", "Tail baseline", "Corrected Y", "Peak fit", "Fit residual", "Normalized residual", *labels])
             for row_index, x_value in enumerate(fit_result.x):
                 writer.writerow(
                     [
@@ -3898,6 +4894,8 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
                         tail_baseline[row_index],
                         corrected_y[row_index],
                         fit_result.normalized_fit[row_index],
+                        fit_residual[row_index],
+                        normalized_residual[row_index],
                         *[component[row_index] for component in components],
                     ]
                 )
@@ -3925,17 +4923,11 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         text = self.run_label.text().strip()
         return text if text and text != "No image loaded" else "Run: Not Loaded"
 
-    def _image_display_title(self, title):
-        run_text = self._run_display_text()
-        if run_text == "Run: Not Loaded":
-            return title
-        return f"{run_text} | {title}"
-
     def _set_image_title(self, title):
+        if hasattr(self, 'image_run_title'):
+            self.image_run_title.setText(self._run_display_text())
         if hasattr(self, 'image_title'):
-            self.image_title.setText(self._image_display_title(title))
-        if hasattr(self, 'image_status'):
-            self.image_status.setText(getattr(self, 'current_tilt_text', "Tilt: --"))
+            self.image_title.setText(title)
 
     def _spectrum_status_parts(self, view_label=None):
         if self.last_x.size == 0:
@@ -3943,8 +4935,8 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         parts = []
         if view_label:
             parts.append(f"View: {view_label}")
-        parts.append("Gap corrected ON" if self.gap_check.isChecked() else "Gap corrected OFF")
-        parts.append("BG remove ON" if self.bg_check.isChecked() else "BG remove OFF")
+        parts.append("Gap corrected ON" if self._gap_correction_enabled() else "Gap corrected OFF")
+        parts.append("BG remove ON" if self._background_removal_enabled() else "BG remove OFF")
         roi_text = "; ".join(f"{begin}-{end}" for begin, end in self.roi_ranges())
         col_begin, col_end = self.col_range()
         if roi_text:
@@ -3974,16 +4966,15 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         panel = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
+        self.image_run_title = QtWidgets.QLabel("Run: Not Loaded")
+        self.image_run_title.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.image_run_title.setFont(QtGui.QFont("Arial", 13))
+        layout.addWidget(self.image_run_title)
         self.image_title = QtWidgets.QLabel("CCD image")
         self.image_title.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        self.image_title.setFont(QtGui.QFont("Arial", 13))
+        self.image_title.setFont(QtGui.QFont("Arial", 11))
+        self.image_title.setStyleSheet("color: #555;")
         layout.addWidget(self.image_title)
-        self.image_status = QtWidgets.QLabel("Tilt: --")
-        self.image_status.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        self.image_status.setFont(QtGui.QFont("Arial", 10))
-        self.image_status.setStyleSheet("color: #555;")
-        layout.addWidget(self.image_status)
-
         self.image_widget = pg.GraphicsLayoutWidget()
         self.image_widget.setBackground('w')
         self.image_plot = self.image_widget.addPlot(row=0, col=0)
@@ -3997,6 +4988,20 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         self.colorbar = pg.ColorBarItem(values=(0, 100), colorMap=pg.colormap.get('viridis'))
         self.colorbar.setImageItem(self.image_item, insert_in=self.image_plot)
         layout.addWidget(self.image_widget, stretch=1)
+
+        display_controls = QtWidgets.QHBoxLayout()
+        display_controls.setContentsMargins(4, 4, 0, 0)
+        display_controls.setSpacing(4)
+        display_controls.addWidget(QtWidgets.QLabel("vmin:"))
+        display_controls.addWidget(self.vmin_spin)
+        display_controls.addSpacing(12)
+        display_controls.addWidget(QtWidgets.QLabel("vmax:"))
+        display_controls.addWidget(self.vmax_spin)
+        display_controls.addSpacing(12)
+        display_controls.addWidget(QtWidgets.QLabel("Cmap:"))
+        display_controls.addWidget(self.cmap_combo)
+        display_controls.addStretch(1)
+        layout.addLayout(display_controls)
         return panel
 
     def _build_spectrum_panel(self):
@@ -4033,7 +5038,7 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         self.spectrum_view_buttons = {}
         for mode, label, callback in (
             ("raw", "Raw", self.show_raw_spectrum),
-            ("gap", "Gap C.", self.show_gap_corrected_spectrum),
+            ("gap", "Corrected", self.show_gap_corrected_spectrum),
             ("fit", "Peak Fit", self.show_peak_fit_view),
             ("calibration", "Calibration", self.show_calibration_view),
         ):
@@ -4060,7 +5065,7 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
     def import_tiff(self):
         path, _selected = QtWidgets.QFileDialog.getOpenFileName(
             self,
-            "Import TIFF",
+            "Import Image",
             "",
             "TIFF files (*.tif *.tiff);;All files (*.*)",
         )
@@ -4072,12 +5077,12 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
             self.filepaths = [path]
             self._after_image_loaded("Raw image", previous_regions=previous_regions)
         except Exception as exc:
-            QtWidgets.QMessageBox.warning(self, "Import TIFF", str(exc))
+            QtWidgets.QMessageBox.warning(self, "Import Image", str(exc))
 
     def import_tiff_stack(self):
         paths, _selected = QtWidgets.QFileDialog.getOpenFileNames(
             self,
-            "Import TIFF Stack",
+            "Import Stack Image",
             "",
             "TIFF files (*.tif *.tiff);;All files (*.*)",
         )
@@ -4098,7 +5103,7 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
             title = f"Stacked raw image ({len(paths)} images)" if len(paths) > 1 else "Raw image"
             self._after_image_loaded(title, previous_regions=previous_regions)
         except Exception as exc:
-            QtWidgets.QMessageBox.warning(self, "Import TIFF Stack", str(exc))
+            QtWidgets.QMessageBox.warning(self, "Import Stack Image", str(exc))
 
     def _after_image_loaded(self, title, previous_regions=None):
         self.immm = None
@@ -4107,8 +5112,6 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         self.processed_gap_mask = None
         self.processed_detector_background_mask = None
         self.current_tilt_text = "Tilt: --"
-        if hasattr(self, 'tilt_label'):
-            self.tilt_label.setText("Auto Tilt: --")
         if hasattr(self, 'manual_tilt_spin'):
             self.manual_tilt_spin.blockSignals(True)
             self.manual_tilt_spin.setValue(0.0)
@@ -4117,6 +5120,8 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         self.last_y = np.array([], dtype=float)
         if hasattr(self, 'last_peak_fit_profile'):
             del self.last_peak_fit_profile
+        if hasattr(self, 'last_iad_mc_sample'):
+            del self.last_iad_mc_sample
         self.run_label.setText(_run_label_from_paths(self.filepaths))
         if hasattr(self, 'file_path_edit'):
             self.file_path_edit.setText("; ".join(self.filepaths))
@@ -4139,8 +5144,8 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
             self.vmax_spin.setValue(int(round(float(np.nanpercentile(finite, 99.5)))))
             self.vmin_spin.blockSignals(False)
             self.vmax_spin.blockSignals(False)
-        self.display_image(self.imm, title)
-        self.statusBar().showMessage(f"Loaded {title}: {self.imm.shape}")
+        self._process_image_with_tilt(0.0, display_title=title)
+        self.statusBar().showMessage(f"Loaded {title} and initialized spectrum extraction: {self.imm.shape}")
 
     def _set_spin_limits(self, shape):
         rows, cols = shape
@@ -4239,32 +5244,30 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
 
     def process_image(self):
         if self.imm is None:
-            QtWidgets.QMessageBox.information(self, "Process", "Import a TIFF image first.")
+            QtWidgets.QMessageBox.information(self, "Tilt Correction", "Import an image first.")
             return
         try:
             tilt = estimate_image_tilt_angle(self.imm)
             self.manual_tilt_spin.blockSignals(True)
             self.manual_tilt_spin.setValue(float(tilt))
             self.manual_tilt_spin.blockSignals(False)
-            self.tilt_label.setText(f"Auto Tilt: {tilt:.2f} deg")
             self._process_image_with_tilt(tilt)
-            self.statusBar().showMessage(f"Processed image with auto tilt {tilt:.2f} deg")
+            self.statusBar().showMessage(f"Applied auto tilt correction {tilt:.2f} deg")
         except Exception as exc:
-            QtWidgets.QMessageBox.warning(self, "Process", str(exc))
+            QtWidgets.QMessageBox.warning(self, "Tilt Correction", str(exc))
 
     def apply_manual_tilt(self):
         if self.imm is None:
-            QtWidgets.QMessageBox.information(self, "Apply Tilt", "Import a TIFF image first.")
+            QtWidgets.QMessageBox.information(self, "Manual Tilt", "Import an image first.")
             return
         try:
             tilt = float(self.manual_tilt_spin.value())
             self._process_image_with_tilt(tilt)
-            self.tilt_label.setText(f"Manual Tilt: {tilt:.2f} deg")
             self.statusBar().showMessage(f"Processed image with manual tilt {tilt:.2f} deg")
         except Exception as exc:
-            QtWidgets.QMessageBox.warning(self, "Apply Tilt", str(exc))
+            QtWidgets.QMessageBox.warning(self, "Manual Tilt", str(exc))
 
-    def _process_image_with_tilt(self, tilt):
+    def _process_image_with_tilt(self, tilt, display_title="Processed image"):
         self.current_tilt_text = f"Tilt: {tilt:.2f} deg"
         gap_defaults = self.parm['ccd_gap']
         self.raw_gap_mask = detect_detector_gap_mask(
@@ -4283,6 +5286,8 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         self.last_y = np.array([], dtype=float)
         if hasattr(self, 'last_peak_fit_profile'):
             del self.last_peak_fit_profile
+        if hasattr(self, 'last_iad_mc_sample'):
+            del self.last_iad_mc_sample
         self._clear_spectrum()
         self._clear_peak_fit_results()
         self._update_spectrum_header()
@@ -4305,7 +5310,7 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
             drop_fraction=gap_defaults.get('drop_fraction', 0.65),
         )
         self._set_spin_limits(self.immm.shape)
-        self.display_image(self.immm, "Processed image")
+        self.display_image(self.immm, display_title)
 
     def display_image(self, data, title):
         self._set_image_title(title)
@@ -4367,16 +5372,6 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
                 z_value=28,
             )
 
-        if self.gap_overlay_check.isChecked():
-            mask = self.processed_gap_mask
-            if mask is not None and mask.shape == data.shape:
-                overlay = np.zeros(mask.shape + (4,), dtype=np.ubyte)
-                overlay[mask, 0] = 155
-                overlay[mask, 3] = 120
-                item = pg.ImageItem(overlay)
-                item.setZValue(20)
-                self.image_plot.addItem(item)
-                self._image_region_items.append(item)
 
     def _add_region(self, values, horizontal, color, pen):
         orientation = pg.LinearRegionItem.Horizontal if horizontal else pg.LinearRegionItem.Vertical
@@ -4438,7 +5433,7 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
     def auto_background(self):
         data = self.immm
         if data is None:
-            QtWidgets.QMessageBox.information(self, "Auto BG", "Process an image before selecting background.")
+            QtWidgets.QMessageBox.information(self, "Auto BG", "Import an image before selecting background.")
             return
         roi_ranges = self.roi_ranges()
         if not roi_ranges:
@@ -4480,13 +5475,13 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         if self.spect_processor is None:
             return
         gap_defaults = self.parm['ccd_gap']
-        self.spect_processor.toggle_gap_correction(self.gap_check.isChecked())
+        self.spect_processor.toggle_gap_correction(self._gap_correction_enabled())
         self.spect_processor.set_gap_correction_params(
             max_width=gap_defaults.get('max_width', 8),
             drop_fraction=gap_defaults.get('drop_fraction', 0.65),
         )
-        self.spect_processor.toggle_background_subtraction(self.bg_check.isChecked())
-        if self.bg_check.isChecked():
+        self.spect_processor.toggle_background_subtraction(self._background_removal_enabled())
+        if self._background_removal_enabled():
             col_begin, col_end = self.col_range()
             bg_rois = [
                 (row_begin, row_end + 1, col_begin, col_end + 1)
@@ -4496,7 +5491,7 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
 
     def plot_spectrum(self):
         if self.spect_processor is None:
-            QtWidgets.QMessageBox.information(self, "Plot", "Process an image before plotting a spectrum.")
+            QtWidgets.QMessageBox.information(self, "Plot", "Import an image before plotting a spectrum.")
             return
         try:
             self.configure_processor()
@@ -4514,9 +5509,9 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
             raw_y = _normalize_spectrum(raw_spectrum)
             self.last_raw_y = raw_y if raw_y.size == y_data.size else y_data.copy()
             self.last_raw_x = np.arange(col_begin, col_begin + self.last_raw_y.size, dtype=float)
-            view_label = "Gap C." if self.gap_check.isChecked() else "Raw"
-            self._set_spectrum_view_mode("gap" if self.gap_check.isChecked() else "raw")
-            self._draw_spectrum(x_data, y_data, label=view_label, show_gap_markers=self.gap_check.isChecked(), view_label=view_label)
+            view_label = "Corrected" if (self._gap_correction_enabled() or self._background_removal_enabled()) else "Raw"
+            self._set_spectrum_view_mode("gap" if (self._gap_correction_enabled() or self._background_removal_enabled()) else "raw")
+            self._draw_spectrum(x_data, y_data, label=view_label, show_gap_markers=False, view_label=view_label)
             self.statusBar().showMessage(f"Plotted spectrum with {len(rois)} ROI strip(s)")
         except Exception as exc:
             QtWidgets.QMessageBox.warning(self, "Plot", str(exc))
@@ -4614,7 +5609,7 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         self._add_gap_tick_group(x_data, both_mask, y0, y1, QtGui.QColor(205, 175, 255, 220), "ROI+BG gap fill")
         self._add_gap_tick_group(x_data, other_mask, y0, y1, QtGui.QColor(255, 175, 175, 190), "CCD gap fill")
 
-    def _draw_spectrum(self, x_data, y_data, label=None, show_gap_markers=True, view_label=None):
+    def _draw_spectrum(self, x_data, y_data, label=None, show_gap_markers=False, view_label=None):
         self._clear_spectrum()
         self.spectrum_plot.setLabel('bottom', 'Column Index', **{'font-size': '13pt', 'font-family': 'Arial'})
         self.spectrum_plot.setLabel('left', 'Normalized intensity', **{'font-size': '13pt', 'font-family': 'Arial'})
@@ -4627,9 +5622,6 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
         if label:
             legend_label = f"{label}, {legend_label}"
         self._legend.addItem(line, legend_label)
-
-        if show_gap_markers:
-            self._plot_gap_ticks(x_data, y_data)
 
         self._set_spectrum_view_range(x_data, [y_data])
         self._update_spectrum_header(view_label)
@@ -4654,11 +5646,11 @@ class QtXESAnalyzer(QtWidgets.QMainWindow):
 
     def save_spectrum_svg(self):
         if self.last_x.size == 0:
-            QtWidgets.QMessageBox.information(self, "Save SVG", "Plot a spectrum first.")
+            QtWidgets.QMessageBox.information(self, "Export Image", "Plot a spectrum first.")
             return
         path, _selected = QtWidgets.QFileDialog.getSaveFileName(
             self,
-            "Save spectrum SVG",
+            "Export spectrum image",
             self._default_save_path(f"{self._run_basename()}_spectrum.svg"),
             "SVG vector (*.svg)",
         )

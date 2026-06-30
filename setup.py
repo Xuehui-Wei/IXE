@@ -14,8 +14,8 @@ setup(
     package_data={'IXE': ['*.py']},
     entry_points={
         'console_scripts': [
-            'xes-analyzer=IXE.qt_analyzer:run_gui',
-            'xes-analyzer-qt=IXE.qt_analyzer:run_gui',
+            'xes-analyzer=IXE.xes_app:run_gui',
+            'xes-analyzer-qt=IXE.xes_app:run_gui',
             'xes-analyzer-tk=IXE.xes_analyzer:run_gui',
         ],
     },
